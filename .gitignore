@@ -27,6 +27,23 @@ Thumbs.db
 # Logs
 *.log
 
+# Build artifacts
+frontend/.next/
+frontend/out/
+
+# Test artifacts
+test-results/
+screenshots/
+screenshot.png
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Python test
+__pycache__/
+*.pyc
+
 # Environment
 .env
 node_modules/
