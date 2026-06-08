@@ -29,3 +29,6 @@ Thumbs.db
 
 # Environment
 .env
+node_modules/
+screenshots/
+test-chat.mjs
