@@ -1,5 +1,3 @@
-import { StreamingTextResponse } from 'ai';
-
 export async function POST(req: Request) {
   const { messages } = await req.json();
 
@@ -9,5 +7,7 @@ export async function POST(req: Request) {
     body: JSON.stringify({ messages }),
   });
 
-  return new StreamingTextResponse(response.body!);
+  return new Response(response.body, {
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
 }
