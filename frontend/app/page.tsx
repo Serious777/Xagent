@@ -11,24 +11,20 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
 
-  // 自动聚焦输入框
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // Textarea 自动增高
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     handleInputChange(e);
     e.target.style.height = 'auto';
     e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px';
   };
 
-  // Enter 发送，Shift+Enter 换行
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -49,7 +45,7 @@ export default function Home() {
         style={{ borderColor: 'var(--border)', background: 'var(--bg-secondary)' }}
       >
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold" style={{ background: 'var(--accent)' }}>
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold text-white" style={{ background: 'var(--accent)' }}>
             X
           </div>
           <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
@@ -68,7 +64,7 @@ export default function Home() {
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full px-4">
             <div
-              className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl font-bold mb-6"
+              className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl font-bold mb-6 text-white"
               style={{ background: 'linear-gradient(135deg, var(--accent), #8b5cf6)' }}
             >
               X
@@ -80,7 +76,6 @@ export default function Home() {
               AI 智能助手，支持工具调用和知识库管理
             </p>
 
-            {/* 快捷操作 */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-md">
               {[
                 { icon: '🔍', label: '搜索信息', desc: '搜索互联网获取实时信息' },
@@ -117,12 +112,11 @@ export default function Home() {
               <Message key={msg.id} message={msg} />
             ))}
 
-            {/* 加载指示器 */}
             {isLoading && (
               <div className="flex items-start gap-3 mb-6 message-enter">
                 <div
-                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0"
-                  style={{ background: 'var(--accent)', color: 'white' }}
+                  className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 text-white"
+                  style={{ background: 'var(--accent)' }}
                 >
                   X
                 </div>
@@ -148,7 +142,7 @@ export default function Home() {
         <div className="max-w-3xl mx-auto px-4 py-4">
           <div
             className="flex items-end gap-2 rounded-2xl px-4 py-3 input-glow transition-all"
-            style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border)' }}
+            style={{ background: 'var(--bg-primary)', border: '1px solid var(--border)' }}
           >
             <textarea
               ref={inputRef}
@@ -158,14 +152,14 @@ export default function Home() {
               placeholder="输入你的问题... (Enter 发送, Shift+Enter 换行)"
               rows={1}
               className="flex-1 bg-transparent border-none outline-none resize-none text-sm leading-relaxed"
-              style={{ color: 'var(--text-primary)', maxHeight: '200px' }}
+              style={{ color: 'var(--text-primary)' }}
               disabled={isLoading}
             />
             {isLoading ? (
               <button
                 type="button"
                 onClick={stop}
-                className="w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-105 flex-shrink-0"
+                className="w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-105 flex-shrink-0 text-white"
                 style={{ background: '#ef4444' }}
               >
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="white">
@@ -184,7 +178,7 @@ export default function Home() {
                   }
                 }}
                 disabled={!input.trim()}
-                className="w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-105 disabled:opacity-30 disabled:hover:scale-100 flex-shrink-0"
+                className="w-8 h-8 rounded-lg flex items-center justify-center transition-all hover:scale-105 disabled:opacity-30 disabled:hover:scale-100 flex-shrink-0 text-white"
                 style={{ background: input.trim() ? 'var(--accent)' : 'var(--bg-hover)' }}
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

@@ -3,7 +3,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { useState } from 'react';
 
 interface MessageProps {
@@ -14,19 +14,20 @@ interface MessageProps {
   };
 }
 
-// 自定义代码高亮主题
 const customTheme = {
-  ...oneDark,
+  ...oneLight,
   'pre[class*="language-"]': {
-    ...oneDark['pre[class*="language-"]'],
-    background: '#1a1a24',
+    ...oneLight['pre[class*="language-"]'],
+    background: '#1e293b',
     borderRadius: '8px',
     fontSize: '13px',
     lineHeight: '1.6',
+    color: '#e2e8f0',
   },
   'code[class*="language-"]': {
-    ...oneDark['code[class*="language-"]'],
+    ...oneLight['code[class*="language-"]'],
     fontSize: '13px',
+    color: '#e2e8f0',
   },
 };
 
@@ -44,9 +45,8 @@ function CopyButton({ text }: { text: string }) {
       onClick={handleCopy}
       className="absolute top-2 right-2 px-2 py-1 rounded text-xs transition-all"
       style={{
-        background: copied ? 'var(--accent)' : 'var(--bg-tertiary)',
-        color: copied ? 'white' : 'var(--text-secondary)',
-        border: '1px solid var(--border)',
+        background: copied ? 'var(--accent)' : 'rgba(255,255,255,0.1)',
+        color: copied ? 'white' : '#94a3b8',
       }}
     >
       {copied ? '✓ 已复制' : '复制'}
@@ -61,8 +61,8 @@ export default function Message({ message }: MessageProps) {
     <div className={`flex mb-6 message-enter ${isUser ? 'justify-end' : 'justify-start'}`}>
       {!isUser && (
         <div
-          className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 mr-3 mt-1"
-          style={{ background: 'var(--accent)', color: 'white' }}
+          className="w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold flex-shrink-0 mr-3 mt-1 text-white"
+          style={{ background: 'var(--accent)' }}
         >
           X
         </div>
@@ -78,11 +78,11 @@ export default function Message({ message }: MessageProps) {
         }}
       >
         {isUser ? (
-          <p className="text-sm leading-relaxed" style={{ color: 'var(--text-primary)' }}>
+          <p className="text-sm leading-relaxed text-white">
             {message.content}
           </p>
         ) : (
-          <div className="markdown-body" style={{ color: 'var(--text-primary)' }}>
+          <div className="markdown-body">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -102,8 +102,8 @@ export default function Message({ message }: MessageProps) {
                     <div className="relative my-3">
                       {match && (
                         <div
-                          className="absolute top-0 left-0 px-2 py-0.5 text-xs rounded-bl-lg rounded-tr-lg z-10"
-                          style={{ background: 'var(--accent)', color: 'white' }}
+                          className="absolute top-0 left-0 px-2 py-0.5 text-xs rounded-bl-lg rounded-tr-lg z-10 text-white"
+                          style={{ background: 'var(--accent)' }}
                         >
                           {match[1]}
                         </div>
@@ -123,7 +123,6 @@ export default function Message({ message }: MessageProps) {
                     </div>
                   );
                 },
-                // 表格样式
                 table({ children }) {
                   return (
                     <div className="overflow-x-auto my-3">

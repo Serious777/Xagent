@@ -3,18 +3,18 @@
 @tailwind utilities;
 
 :root {
-  --bg-primary: #0a0a0f;
-  --bg-secondary: #111118;
-  --bg-tertiary: #1a1a24;
-  --bg-hover: #22222e;
-  --border: #2a2a3a;
-  --text-primary: #e8e8ed;
-  --text-secondary: #8888a0;
-  --text-muted: #555568;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f8f9fa;
+  --bg-tertiary: #f0f1f3;
+  --bg-hover: #e8e9ec;
+  --border: #e0e1e6;
+  --text-primary: #1a1a2e;
+  --text-secondary: #5a5a72;
+  --text-muted: #9090a8;
   --accent: #3b82f6;
   --accent-hover: #2563eb;
-  --user-bg: #1e3a5f;
-  --assistant-bg: #111118;
+  --user-bg: #3b82f6;
+  --assistant-bg: #f8f9fa;
 }
 
 * {
@@ -32,7 +32,6 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* 自定义滚动条 */
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -47,10 +46,10 @@ html, body {
   background: var(--text-muted);
 }
 
-/* Markdown 样式 */
 .markdown-body {
   line-height: 1.7;
   font-size: 14px;
+  color: var(--text-primary);
 }
 .markdown-body p {
   margin-bottom: 0.75em;
@@ -64,9 +63,10 @@ html, body {
   border-radius: 4px;
   font-size: 0.9em;
   font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #d63384;
 }
 .markdown-body pre {
-  background: var(--bg-tertiary) !important;
+  background: #1e293b !important;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 16px;
@@ -77,6 +77,7 @@ html, body {
   background: none;
   padding: 0;
   font-size: 13px;
+  color: #e2e8f0;
 }
 .markdown-body ul, .markdown-body ol {
   padding-left: 1.5em;
@@ -94,6 +95,7 @@ html, body {
 .markdown-body h1, .markdown-body h2, .markdown-body h3 {
   font-weight: 600;
   margin: 16px 0 8px;
+  color: var(--text-primary);
 }
 .markdown-body h1 { font-size: 1.5em; }
 .markdown-body h2 { font-size: 1.25em; }
@@ -129,27 +131,18 @@ html, body {
   margin: 16px 0;
 }
 
-/* 输入框动画 */
 .input-glow:focus {
-  box-shadow: 0 0 0 1px var(--accent), 0 0 20px rgba(59, 130, 246, 0.1);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 20px rgba(59, 130, 246, 0.08);
 }
 
-/* 消息入场动画 */
 @keyframes messageIn {
-  from {
-    opacity: 0;
-    transform: translateY(8px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .message-enter {
   animation: messageIn 0.3s ease-out;
 }
 
-/* 打字光标 */
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }
@@ -162,7 +155,6 @@ html, body {
   margin-left: 2px;
 }
 
-/* 加载动画 */
 @keyframes pulse-dot {
   0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
   40% { transform: scale(1); opacity: 1; }
