@@ -49,3 +49,4 @@ __pycache__/
 node_modules/
 screenshots/
 test-chat.mjs
+frontend/.next/

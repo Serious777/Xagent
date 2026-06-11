@@ -113,3 +113,17 @@ html, body {
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #10a37f; animation: dotPulse 1.4s ease-in-out infinite; }
 .dot:nth-child(2) { animation-delay: 0.2s; }
 .dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* 预览面板滑入 */
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.animate-slide-in { animation: slideIn 0.25s ease-out; }
+
+/* 弹窗淡入 */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.animate-fade-in { animation: fadeIn 0.2s ease-out; }
