@@ -81,12 +81,11 @@ logger.info("xagent_started", model=MODEL)
 
 # ============ 工具定义（ARIZ 步骤 + wiki） ============
 
-# ARIZ Step 1 工具
 ARIZ_STEP1_TOOL = {
     "type": "function",
     "function": {
         "name": "ariz_step1_problem",
-        "description": "ARIZ第1步：确认问题识别结果，提取结构化问题信息",
+        "description": "ARIZ第1步：用户确认后调用此工具保存问题识别结果",
         "parameters": {
             "type": "object",
             "properties": {
@@ -106,34 +105,33 @@ ARIZ_STEP1_TOOL = {
     },
 }
 
-# ARIZ Step 2 工具
 ARIZ_STEP2_TOOL = {
     "type": "function",
     "function": {
         "name": "ariz_step2_components",
-        "description": "ARIZ第2步：确认系统组件分析结果",
+        "description": "ARIZ第2步：用户确认后调用此工具保存组件分析结果",
         "parameters": {
             "type": "object",
             "properties": {
                 "supersystem": {"type": "string", "description": "超系统描述"},
-                "system_name": {"type": "string", "description": "系统名称"},
-                "all_components": {
+                "supersystem_components": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "完整组件列表"
+                    "description": "超系统中与本系统有交互的外部组件"
                 },
+                "system_name": {"type": "string", "description": "系统名称"},
                 "user_added": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "用户补充的组件"
+                    "description": "用户补充的、数据库中没有的组件列表"
                 },
             },
-            "required": ["supersystem", "system_name", "all_components"],
+            "required": ["supersystem", "system_name"],
         },
     },
 }
 
-# ARIZ Step 3-9 工具（通用确认工具）
+
 def make_step_tool(step_num: int, name: str, label: str, fields: list) -> dict:
     props = {}
     required = []
@@ -145,7 +143,7 @@ def make_step_tool(step_num: int, name: str, label: str, fields: list) -> dict:
         "type": "function",
         "function": {
             "name": f"ariz_step{step_num}_{name}",
-            "description": f"ARIZ第{step_num}步：确认{label}结果",
+            "description": f"ARIZ第{step_num}步：用户确认后调用此工具保存{label}结果",
             "parameters": {"type": "object", "properties": props, "required": required},
         },
     }
@@ -191,7 +189,6 @@ ARIZ_TOOL_MAP = {
     "ariz_step9_solution": 9,
 }
 
-# LLM Wiki 工具
 WIKI_TOOL = {
     "type": "function",
     "function": {
@@ -203,78 +200,108 @@ WIKI_TOOL = {
 
 
 def get_tools_for_step(step: str) -> list:
-    """根据当前步骤返回可用工具"""
     tools = [WIKI_TOOL]
-
-    if step == "problem":
-        tools.append(ARIZ_TOOLS[0])   # step1
-    elif step == "components":
-        tools.append(ARIZ_TOOLS[1])   # step2
-    elif step == "contacts":
-        tools.append(ARIZ_TOOLS[2])   # step3
-    elif step == "function":
-        tools.append(ARIZ_TOOLS[3])   # step4
-    elif step == "structure":
-        tools.append(ARIZ_TOOLS[4])   # step5
-    elif step == "summary":
-        tools.append(ARIZ_TOOLS[5])   # step6
-    elif step == "causal":
-        tools.append(ARIZ_TOOLS[6])   # step7
-    elif step == "keypoint":
-        tools.append(ARIZ_TOOLS[7])   # step8
-    elif step == "solution":
-        tools.append(ARIZ_TOOLS[8])   # step9
-
+    step_tool_map = {
+        "problem": 0, "components": 1, "contacts": 2, "function": 3,
+        "structure": 4, "summary": 5, "causal": 6, "keypoint": 7, "solution": 8,
+    }
+    idx = step_tool_map.get(step)
+    if idx is not None:
+        tools.append(ARIZ_TOOLS[idx])
     return tools
 
 
-def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> str:
-    """处理 ARIZ 工具调用，更新状态，返回结果文本"""
+# ============ 工具调用处理 ============
+
+def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
+    """处理 ARIZ 工具调用，返回结构化结果（含 card_data 供前端渲染卡片）"""
     step_num = ARIZ_TOOL_MAP.get(tool_name)
     if not step_num:
-        return json.dumps({"error": f"未知工具: {tool_name}"}, ensure_ascii=False)
+        return {"error": f"未知工具: {tool_name}"}
 
     step_name = ARIZ_STEPS[step_num - 1][0]
 
-    # Step 1: 保存问题识别结果，自动查数据库
+    # ---- Step 1 ----
     if step_num == 1:
-        save_step_result(conv_id, "problem", args)
-        # 自动查询组件数据库
         db_result = query_components_for_step2(args)
-        advance_step(conv_id)  # → components
-        return json.dumps({
-            "status": "confirmed",
-            "message": f"问题识别已确认，进入第2步：系统组件分析",
-            "step1_result": args,
-            "database_query": db_result,
-        }, ensure_ascii=False)
+        step_data = {**args, "database_query": db_result}
+        save_step_result(conv_id, "problem", step_data)
+        state = get_session_state(conv_id)
+        state["database_query"] = db_result
 
-    # Step 2: 保存组件分析结果
+        card = {
+            "step": 1,
+            "title": "问题识别",
+            "status": "current",
+            "saved": True,
+            "data": {
+                "problem_object": args.get("problem_object"),
+                "phenomenon": args.get("phenomenon"),
+                "goal": args.get("goal"),
+                "contradiction_hint": args.get("contradiction_hint"),
+                "constraints": args.get("constraints", []),
+                "database_query": db_result,
+            },
+        }
+        return {
+            "status": "saved",
+            "message": "问题识别结果已保存，请确认",
+            "card_data": card,
+        }
+
+    # ---- Step 2 ----
     elif step_num == 2:
-        save_step_result(conv_id, "components", args)
-        advance_step(conv_id)  # → contacts
-        return json.dumps({
-            "status": "confirmed",
-            "message": f"系统组件分析已确认，进入第3步：接触关系分析",
-            "step2_result": args,
-        }, ensure_ascii=False)
+        state = get_session_state(conv_id)
+        db_result = state.get("database_query", {})
+        primary_system = db_result.get("primary_system", {})
+        db_components = primary_system.get("components", [])
+        db_comp_names = [c["name"] for c in db_components]
 
-    # Step 3-9: 保存结果，前进到下一步
+        user_added = args.get("user_added", [])
+        all_components = db_comp_names + [c for c in user_added if c not in db_comp_names]
+        supersystem_components = args.get("supersystem_components", [])
+
+        merged_args = {
+            "supersystem": args.get("supersystem", ""),
+            "supersystem_components": supersystem_components,
+            "system_name": args.get("system_name", primary_system.get("system", {}).get("name", "")),
+            "all_components": all_components,
+            "user_added": user_added,
+        }
+        save_step_result(conv_id, "components", merged_args)
+
+        card = {
+            "step": 2,
+            "title": "系统组件分析",
+            "status": "current",
+            "saved": True,
+            "data": {
+                **merged_args,
+                "database_query": db_result,
+            },
+        }
+        return {
+            "status": "saved",
+            "message": "系统组件分析结果已保存，请确认",
+            "card_data": card,
+        }
+
+    # ---- Step 3-9 ----
     else:
         save_step_result(conv_id, step_name, args)
-        next_step = advance_step(conv_id)
-        if next_step:
-            next_label = get_step_label(next_step)
-            return json.dumps({
-                "status": "confirmed",
-                "message": f"{get_step_label(step_name)}已确认，进入下一步：{next_label}",
-            }, ensure_ascii=False)
-        else:
-            return json.dumps({
-                "status": "completed",
-                "message": "ARIZ 全部流程已完成！",
-                "all_results": {k: v for k, v in get_session_state(conv_id)["step_results"].items()},
-            }, ensure_ascii=False)
+
+        card = {
+            "step": step_num,
+            "title": get_step_label(step_name),
+            "status": "current",
+            "saved": True,
+            "data": args,
+        }
+        return {
+            "status": "saved",
+            "message": f"{get_step_label(step_name)}结果已保存，请确认",
+            "card_data": card,
+        }
 
 
 # ============ 对话 API ============
@@ -342,7 +369,7 @@ def get_messages(conv_id):
     return jsonify([dict(r) for r in rows])
 
 
-# ============ 聊天接口（ARIZ 版） ============
+# ============ 聊天接口 ============
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -390,14 +417,12 @@ def chat():
             conn.close()
 
     def generate():
-        # 获取当前 ARIZ 状态
         conv_id_for_flow = conv_id or "default"
         state = get_session_state(conv_id_for_flow)
         current_step = state["current_step"]
 
         system_prompt = build_system_prompt(current_step, state)
         tools = get_tools_for_step(current_step)
-        active_skills = {t["function"]["name"]: SKILLS.get(t["function"]["name"], {}) for t in tools if t["function"]["name"] in SKILLS}
 
         tool_calls = {}
         full_response = ""
@@ -442,11 +467,8 @@ def chat():
 
             logger.info("tool_called", tool=func_name, args=list(args.keys()))
 
-            # ARIZ 工具
             if func_name in ARIZ_TOOL_MAP:
-                result_text = handle_ariz_tool_call(conv_id_for_flow, func_name, args)
-                result = json.loads(result_text)
-            # Wiki 工具
+                result = handle_ariz_tool_call(conv_id_for_flow, func_name, args)
             elif func_name == "llm_wiki" and "llm_wiki" in SKILLS:
                 try:
                     result = SKILLS["llm_wiki"]["func"](**args)
@@ -455,6 +477,7 @@ def chat():
             else:
                 result = {"error": f"未知工具: {func_name}"}
 
+            # 输出工具结果（含 card_data 供前端渲染卡片）
             tool_text = f"\n\n**调用工具: {func_name}**\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
             full_response += tool_text
             yield f'0:{json.dumps(tool_text)}\n'
@@ -484,6 +507,41 @@ def ariz_status(conv_id):
 def ariz_reset(conv_id):
     reset_flow(conv_id)
     return jsonify({"ok": True, "message": "流程已重置"})
+
+
+@app.route("/api/ariz/confirm/<conv_id>", methods=["POST"])
+def ariz_confirm(conv_id):
+    """用户确认当前步骤，推进到下一步"""
+    state = get_session_state(conv_id)
+    current_step = state["current_step"]
+    current_idx = get_step_index(current_step)
+    current_label = get_step_label(current_step)
+
+    # 检查是否有保存的结果
+    step_result = get_step_result(conv_id, current_step)
+    if not step_result:
+        return jsonify({"ok": False, "error": f"{current_label}尚未保存结果"}), 400
+
+    # 推进到下一步
+    next_step = advance_step(conv_id)
+
+    if next_step:
+        next_label = get_step_label(next_step)
+        return jsonify({
+            "ok": True,
+            "current_step": next_step,
+            "current_step_index": get_step_index(next_step) + 1,
+            "message": f"{current_label}已确认，进入{next_label}",
+            "card_status": "done",  # 前端用这个把卡片状态从 current 改为 done
+        })
+    else:
+        return jsonify({
+            "ok": True,
+            "current_step": None,
+            "message": "ARIZ 全部流程已完成！",
+            "card_status": "done",
+            "all_results": {k: v for k, v in state["step_results"].items()},
+        })
 
 
 # ---- Skill 列表 ----

@@ -58,12 +58,13 @@ export default function Home() {
     setInput(e.target.value);
   };
 
-  const send = async () => {
-    if (!input.trim() || loading) return;
-    const userMsg: Msg = { id: Date.now().toString(), role: 'user', content: input };
+  const send = async (overrideText?: string) => {
+    const text = overrideText ?? input;
+    if (!text.trim() || loading) return;
+    const userMsg: Msg = { id: Date.now().toString(), role: 'user', content: text };
     const assistantMsg: Msg = { id: (Date.now() + 1).toString(), role: 'assistant', content: '' };
     setMessages(prev => [...prev, userMsg, assistantMsg]);
-    setInput('');
+    if (!overrideText) setInput('');
     setLoading(true);
     if (inputRef.current) inputRef.current.style.height = 'auto';
 
@@ -182,6 +183,8 @@ export default function Home() {
                     message={m}
                     onPreview={() => {}}
                     onArizStep={(stepData) => setArizStep(stepData)}
+                    conversationId={convId}
+                    onStepConfirmed={() => send('已确认，请继续下一步。')}
                   />
                 ))}
                 {loading && (
@@ -217,7 +220,7 @@ export default function Home() {
                     </button>
                   ) : (
                     <button
-                      onClick={send}
+                      onClick={() => send()}
                       disabled={!input.trim()}
                       className="w-8 h-8 rounded-full flex items-center justify-center transition-colors disabled:opacity-20"
                       style={{ background: input.trim() ? '#10a37f' : '#f4f4f5' }}
