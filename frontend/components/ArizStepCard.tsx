@@ -118,7 +118,8 @@ const STEP_NAMES: Record<number, string> = {
 function buildStepSummary(stepNum: number, data: any): string {
   if (stepNum === 1) return data.problem_object || '';
   if (stepNum === 2) return `共${(data.all_components || []).length}个组件`;
-  if (stepNum === 3) return `共${(data.contacts || []).length}个接触关系`;
+  if (stepNum === 3) return `${(data.contacts || []).length}组接触关系`;
+  if (stepNum === 4) return `${(data.functions || []).length}条功能关系`;
   return data.status || data.message || '已完成';
 }
 

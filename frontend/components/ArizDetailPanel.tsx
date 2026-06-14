@@ -6,6 +6,8 @@ import { ArizStepData } from './ArizStepCard';
 interface ArizDetailPanelProps {
   stepData: ArizStepData;
   onClose: () => void;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
 }
 
 // ========== Step 1: 问题识别 =========
@@ -49,8 +51,8 @@ function Step1Detail({ data }: { data: any }) {
 function Step2Detail({ data }: { data: any }) {
   const dbSystem = data.database_query?.primary_system;
   const dbComponents: any[] = dbSystem?.components || [];
-  const supersystemComponents: string[] = data.supersystem_components || [];
-  const userAdded: string[] = data.user_added || [];
+  const supersystemComponents: any[] = data.supersystem_components || [];
+  const userAdded: any[] = data.user_added || [];
 
   const [components, setComponents] = useState(() => {
     const result: any[] = [];
@@ -64,10 +66,15 @@ function Step2Detail({ data }: { data: any }) {
       });
     }
     for (const raw of supersystemComponents) {
-      result.push({ name: raw, functions: [], description: '超系统组件', isFromDb: false, isSuper: true });
+      // 兼容字符串和对象格式
+      const name = typeof raw === 'string' ? raw : raw.name;
+      const funcs = typeof raw === 'string' ? [] : (raw.functions || []);
+      result.push({ name, functions: funcs, description: '超系统组件', isFromDb: false, isSuper: true });
     }
     for (const raw of userAdded) {
-      result.push({ name: raw, functions: [], description: '用户补充', isFromDb: false, isSuper: false });
+      const name = typeof raw === 'string' ? raw : raw.name;
+      const funcs = typeof raw === 'string' ? [] : (raw.functions || []);
+      result.push({ name, functions: funcs, description: '用户补充', isFromDb: false, isSuper: false });
     }
     return result;
   });
@@ -77,6 +84,12 @@ function Step2Detail({ data }: { data: any }) {
 
   const handleDelete = (index: number) => {
     setComponents((prev: any[]) => prev.filter((_: any, i: number) => i !== index));
+  };
+
+  const updateFunctions = (index: number, funcsStr: string) => {
+    setComponents((prev: any[]) => prev.map((c: any, i: number) =>
+      i === index ? { ...c, functions: funcsStr.split(/[、,，]/).map((s: string) => s.trim()).filter(Boolean) } : c
+    ));
   };
 
   const handleAdd = () => {
@@ -124,7 +137,18 @@ function Step2Detail({ data }: { data: any }) {
                   {comp.isFromDb && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">库</span>}
                   {comp.isSuper && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-600">超系统</span>}
                 </td>
-                <td className="py-2.5 text-gray-600">{funcs || <span className="text-gray-400">—</span>}</td>
+                <td className="py-2.5 text-gray-600">
+                  {comp.isFromDb ? (
+                    funcs || <span className="text-gray-400">—</span>
+                  ) : (
+                    <input
+                      value={funcs}
+                      onChange={(e) => updateFunctions(i, e.target.value)}
+                      placeholder="输入功能，用顿号分隔"
+                      className="w-full text-sm text-gray-600 bg-transparent border-none p-0 focus:outline-none focus:ring-0 placeholder:text-gray-300"
+                    />
+                  )}
+                </td>
                 <td className="py-2.5 text-right">
                   <button onClick={() => handleDelete(i)} className="text-xs text-red-500 hover:text-red-700 transition-colors">删除</button>
                 </td>
@@ -150,67 +174,170 @@ function Step2Detail({ data }: { data: any }) {
 
 // ========== Step 3: 接触关系分析 ==========
 function Step3Detail({ data }: { data: any }) {
-  const contacts = data.contacts || [];
+  const contacts: any[] = data.contacts || [];
+  const allComponents: string[] = data.all_components || [];
+
+  // 构建接触集合（双向）
+  const contactSet = new Set<string>();
+  for (const c of contacts) {
+    contactSet.add(`${c.component_a}||${c.component_b}`);
+    contactSet.add(`${c.component_b}||${c.component_a}`);
+  }
+
+  // 如果没有 all_components，从 contacts 提取唯一组件名
+  const components = allComponents.length > 0
+    ? allComponents
+    : [...new Set(contacts.flatMap((c: any) => [c.component_a, c.component_b]))];
+
+  if (components.length === 0) {
+    return <p className="text-sm text-gray-400">暂无组件数据</p>;
+  }
+
+  // 组件名截断（矩阵列头空间有限）
+  const trunc = (name: string) => name.length > 6 ? name.slice(0, 6) + '…' : name;
+
   return (
     <div>
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-gray-200">
-            <th className="text-left py-2.5 font-medium text-gray-600">组件A</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">组件B</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">接触类型</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">界面</th>
-          </tr>
-        </thead>
-        <tbody>
-          {contacts.map((c: any, i: number) => (
-            <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-              <td className="py-2.5 text-gray-900">{c.component_a}</td>
-              <td className="py-2.5 text-gray-900">{c.component_b}</td>
-              <td className="py-2.5 text-gray-600">{c.contact_type}</td>
-              <td className="py-2.5 text-gray-600">{c.interface || c.interface_desc}</td>
+      <Label text="组件互相作用分析" />
+      <div className="overflow-x-auto mt-2">
+        <table className="text-xs border-collapse">
+          <thead>
+            <tr>
+              <th className="py-2 px-2 font-medium text-gray-600 text-left border-b border-gray-200"></th>
+              {components.map((name: string, i: number) => (
+                <th key={i} className="py-2 px-2 font-medium text-gray-600 text-center border-b border-gray-200 min-w-[72px]">
+                  {trunc(name)}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {components.map((rowName: string, ri: number) => (
+              <tr key={ri}>
+                <td className="py-2 px-2 font-medium text-gray-700 text-left border-b border-gray-100 whitespace-nowrap">
+                  {rowName}
+                </td>
+                {components.map((colName: string, ci: number) => {
+                  if (ri === ci) {
+                    return <td key={ci} className="py-2 px-2 text-center border-b border-gray-100 bg-gray-50"></td>;
+                  }
+                  const inContact = contactSet.has(`${rowName}||${colName}`);
+                  return (
+                    <td key={ci} className="py-2 px-2 text-center border-b border-gray-100">
+                      {inContact
+                        ? <span className="text-emerald-600 font-medium">接触(+)</span>
+                        : <span className="text-gray-400">不接触(-)</span>
+                      }
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
 
 // ========== Step 4: 功能建模 ==========
 function Step4Detail({ data }: { data: any }) {
-  const functions = data.functions || [];
-  const typeColors: Record<string, string> = {
-    useful: 'bg-emerald-50 text-emerald-700', insufficient: 'bg-amber-50 text-amber-700',
-    excessive: 'bg-red-50 text-red-700', harmful: 'bg-red-100 text-red-800', missing: 'bg-gray-100 text-gray-600',
+  const typeConfig: Record<string, { label: string; color: string }> = {
+    useful:       { label: '有益功能', color: 'bg-blue-50 text-blue-700 border-blue-200' },
+    insufficient: { label: '不足功能', color: 'bg-gray-100 text-gray-600 border-gray-200' },
+    excessive:    { label: '过度功能', color: 'bg-orange-50 text-orange-700 border-orange-200' },
+    harmful:      { label: '有害功能', color: 'bg-red-50 text-red-700 border-red-200' },
   };
-  const typeLabels: Record<string, string> = {
-    useful: '有用', insufficient: '不足', excessive: '过度', harmful: '有害', missing: '缺失',
+
+  const [functions, setFunctions] = useState<any[]>(() => data.functions || []);
+  const [showAdd, setShowAdd] = useState(false);
+  const [newFn, setNewFn] = useState({ source: '', target: '', function: '', type: 'useful' });
+
+  const handleDelete = (index: number) => {
+    setFunctions(prev => prev.filter((_: any, i: number) => i !== index));
   };
+
+  const handleAdd = () => {
+    if (!newFn.source.trim() || !newFn.target.trim() || !newFn.function.trim()) return;
+    setFunctions(prev => [...prev, { ...newFn }]);
+    setNewFn({ source: '', target: '', function: '', type: 'useful' });
+    setShowAdd(false);
+  };
+
+  const updateField = (index: number, field: string, value: string) => {
+    setFunctions(prev => prev.map((f: any, i: number) => i === index ? { ...f, [field]: value } : f));
+  };
+
   return (
     <div>
-      <table className="w-full text-sm">
+      <Label text={`功能模型（${functions.length}条）`} />
+      <table className="w-full text-sm mt-2 table-fixed">
         <thead>
           <tr className="border-b border-gray-200">
-            <th className="text-left py-2.5 font-medium text-gray-600">源</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">功能</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">目标</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">类型</th>
-            <th className="text-left py-2.5 font-medium text-gray-600">描述</th>
+            <th className="text-left py-2.5 font-medium text-gray-600 w-[18%]">作用者</th>
+            <th className="text-left py-2.5 font-medium text-gray-600 w-[18%]">作用对象</th>
+            <th className="text-left py-2.5 font-medium text-gray-600 w-[36%]">功能</th>
+            <th className="text-left py-2.5 font-medium text-gray-600 w-[18%]">功能类型</th>
+            <th className="text-right py-2.5 font-medium text-gray-600 w-[10%]">操作</th>
           </tr>
         </thead>
         <tbody>
-          {functions.map((f: any, i: number) => (
-            <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
-              <td className="py-2.5 text-gray-900">{f.source}</td>
-              <td className="py-2.5 text-gray-900">{f.function}</td>
-              <td className="py-2.5 text-gray-600">{f.target}</td>
-              <td className="py-2.5"><span className={`text-xs px-2 py-0.5 rounded-full ${typeColors[f.type] || ''}`}>{typeLabels[f.type] || f.type}</span></td>
-              <td className="py-2.5 text-gray-600 text-xs">{f.description}</td>
-            </tr>
-          ))}
+          {functions.map((f: any, i: number) => {
+            const cfg = typeConfig[f.type] || typeConfig.useful;
+            return (
+              <tr key={i} className="border-b border-gray-100 hover:bg-gray-50">
+                <td className="py-2.5 overflow-hidden">
+                  <input value={f.source} onChange={(e) => updateField(i, 'source', e.target.value)}
+                    className="w-full text-sm text-gray-900 bg-transparent border-none p-0 focus:outline-none truncate" />
+                </td>
+                <td className="py-2.5 overflow-hidden">
+                  <input value={f.target} onChange={(e) => updateField(i, 'target', e.target.value)}
+                    className="w-full text-sm text-gray-600 bg-transparent border-none p-0 focus:outline-none truncate" />
+                </td>
+                <td className="py-2.5 overflow-hidden">
+                  <input value={f.function} onChange={(e) => updateField(i, 'function', e.target.value)}
+                    className="w-full text-sm text-gray-900 bg-transparent border-none p-0 focus:outline-none truncate" />
+                </td>
+                <td className="py-2.5">
+                  <select value={f.type} onChange={(e) => updateField(i, 'type', e.target.value)}
+                    className={`text-xs px-2.5 py-1 rounded-full border font-medium ${cfg.color} focus:outline-none cursor-pointer`}>
+                    {Object.entries(typeConfig).map(([k, v]) => (
+                      <option key={k} value={k}>{v.label}</option>
+                    ))}
+                  </select>
+                </td>
+                <td className="py-2.5 text-right">
+                  <button onClick={() => handleDelete(i)} className="text-xs text-red-500 hover:text-red-700 transition-colors">删除</button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
+      {showAdd ? (
+        <div className="mt-3 grid grid-cols-4 gap-2 items-end">
+          <input value={newFn.source} onChange={(e) => setNewFn(p => ({ ...p, source: e.target.value }))}
+            placeholder="作用者" className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <input value={newFn.target} onChange={(e) => setNewFn(p => ({ ...p, target: e.target.value }))}
+            placeholder="作用对象" className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <input value={newFn.function} onChange={(e) => setNewFn(p => ({ ...p, function: e.target.value }))}
+            placeholder="功能" className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          <div className="flex gap-2">
+            <select value={newFn.type} onChange={(e) => setNewFn(p => ({ ...p, type: e.target.value }))}
+              className="text-sm border border-gray-300 rounded-lg px-3 py-1.5 focus:outline-none">
+              {Object.entries(typeConfig).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="col-span-4 flex gap-2 mt-1">
+            <button onClick={handleAdd} className="text-sm text-blue-600 hover:text-blue-800 font-medium">确认</button>
+            <button onClick={() => { setShowAdd(false); setNewFn({ source: '', target: '', function: '', type: 'useful' }); }} className="text-sm text-gray-500 hover:text-gray-700">取消</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setShowAdd(true)} className="mt-3 text-sm text-blue-600 hover:text-blue-800 font-medium">+ 新增</button>
+      )}
     </div>
   );
 }
@@ -240,7 +367,7 @@ function InfoRow({ label, value }: { label: string; value?: string }) {
 }
 
 // ========== 主面板 ==========
-export default function ArizDetailPanel({ stepData, onClose }: ArizDetailPanelProps) {
+export default function ArizDetailPanel({ stepData, onClose, expanded, onToggleExpand }: ArizDetailPanelProps) {
   const renderContent = () => {
     switch (stepData.step) {
       case 1: return <Step1Detail data={stepData.data} />;
@@ -258,11 +385,30 @@ export default function ArizDetailPanel({ stepData, onClose }: ArizDetailPanelPr
           <span className="text-lg">🔬</span>
           <h2 className="font-semibold text-gray-900">步骤{stepData.step}：{stepData.title}</h2>
         </div>
-        <button onClick={onClose} className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M4 4l8 8M12 4l-8 8" />
-          </svg>
-        </button>
+        <div className="flex items-center gap-1">
+          {onToggleExpand && (
+            <button
+              onClick={onToggleExpand}
+              className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors"
+              title={expanded ? '退出全屏' : '全屏显示'}
+            >
+              {expanded ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/>
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 3H5a2 2 0 00-2 2v3m21 0V5a2 2 0 00-2-2h-3m0 18h3a2 2 0 002-2v-3M3 16v3a2 2 0 002 2h3"/>
+                </svg>
+              )}
+            </button>
+          )}
+          <button onClick={onClose} className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+              <path d="M4 4l8 8M12 4l-8 8" />
+            </svg>
+          </button>
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto px-5 py-4">
         {renderContent()}

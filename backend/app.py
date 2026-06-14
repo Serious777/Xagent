@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import uuid
+import time
 from contextlib import contextmanager
 from datetime import datetime
 import structlog
@@ -129,7 +130,7 @@ ARIZ_STEP1_TOOL = {
                 "system_keywords": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "用于数据库检索的关键词"
+                    "description": "数据库检索用的系统级关键词（必须是系统名称如'热管理系统'、'箱体结构'、'BMS'，不要用现象描述如'低温续航衰减'）"
                 },
                 "phenomenon": {"type": "string", "description": "可观测可量化的现象"},
                 "constraints": {"type": "array", "items": {"type": "string"}, "description": "约束条件"},
@@ -152,8 +153,19 @@ ARIZ_STEP2_TOOL = {
                 "supersystem": {"type": "string", "description": "超系统描述"},
                 "supersystem_components": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "超系统中与本系统有交互的外部组件"
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "functions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "该组件对本系统产生的功能/影响"
+                            }
+                        },
+                        "required": ["name"]
+                    },
+                    "description": "超系统中与本系统有交互的外部组件（含功能描述）"
                 },
                 "system_name": {"type": "string", "description": "系统名称"},
                 "user_added": {
@@ -189,7 +201,7 @@ ARIZ_STEP3_TOOL = make_step_tool(3, "contacts", "接触关系分析", [
     {"name": "contacts", "type": "array", "desc": "组件间接触关系列表", "required": True},
 ])
 ARIZ_STEP4_TOOL = make_step_tool(4, "function", "功能建模", [
-    {"name": "functions", "type": "array", "desc": "功能模型列表", "required": True},
+    {"name": "functions", "type": "array", "desc": "功能模型列表，每项含 source(作用者)、target(作用对象)、function(功能)、type(功能类型: useful/insufficient/excessive/harmful)", "required": True},
 ])
 ARIZ_STEP5_TOOL = make_step_tool(5, "structure", "系统结构分析", [
     {"name": "structure_info", "type": "object", "desc": "结构参数", "required": True},
@@ -225,18 +237,9 @@ ARIZ_TOOL_MAP = {
     "ariz_step9_solution": 9,
 }
 
-WIKI_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "llm_wiki",
-        "description": SKILLS["llm_wiki"]["description"],
-        "parameters": SKILLS["llm_wiki"]["parameters"],
-    },
-}
-
 
 def get_tools_for_step(step: str) -> list:
-    tools = [WIKI_TOOL]
+    tools = []
     step_tool_map = {
         "problem": 0, "components": 1, "contacts": 2, "function": 3,
         "structure": 4, "summary": 5, "causal": 6, "keypoint": 7, "solution": 8,
@@ -261,8 +264,6 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
         db_result = query_components_for_step2(args)
         step_data = {**args, "database_query": db_result}
         save_step_result(conv_id, "problem", step_data)
-        state = get_session_state(conv_id)
-        state["database_query"] = db_result
 
         card = {
             "step": 1,
@@ -281,21 +282,43 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
         return {"status": "saved", "message": "问题识别结果已保存，请确认", "card_data": card}
 
     elif step_num == 2:
-        state = get_session_state(conv_id)
-        db_result = state.get("database_query", {})
+        # 从 Step 1 的保存结果中读取数据库查询结果（已在 step_results["problem"] 中）
+        step1_data = get_step_result(conv_id, "problem")
+        db_result = step1_data.get("database_query", {})
         primary_system = db_result.get("primary_system", {})
         db_components = primary_system.get("components", [])
         db_comp_names = [c["name"] for c in db_components]
 
         user_added = args.get("user_added", [])
-        all_components = db_comp_names + [c for c in user_added if c not in db_comp_names]
+        # 归一化 user_added：字符串 → {name, functions: []}
+        user_added_normalized = [
+            {"name": c, "functions": []} if isinstance(c, str) else c
+            for c in user_added
+        ]
+        # 归一化 supersystem_components：字符串 → {name, functions: []}
+        super_raw = args.get("supersystem_components", [])
+        supersystem_components = [
+            {"name": c, "functions": []} if isinstance(c, str) else c
+            for c in super_raw
+        ]
+        super_names = [c["name"] if isinstance(c, dict) else c for c in supersystem_components]
+
+        all_components = db_comp_names + [
+            c["name"] if isinstance(c, dict) else c
+            for c in user_added_normalized
+            if (c["name"] if isinstance(c, dict) else c) not in db_comp_names
+        ]
+        # 加入超组件
+        for n in super_names:
+            if n not in all_components:
+                all_components.append(n)
 
         merged_args = {
             "supersystem": args.get("supersystem", ""),
-            "supersystem_components": args.get("supersystem_components", []),
+            "supersystem_components": supersystem_components,
             "system_name": args.get("system_name", primary_system.get("system", {}).get("name", "")),
             "all_components": all_components,
-            "user_added": user_added,
+            "user_added": user_added_normalized,
         }
         save_step_result(conv_id, "components", merged_args)
 
@@ -310,12 +333,17 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
 
     else:
         save_step_result(conv_id, step_name, args)
+        card_data = {**args}
+        # Step 3 需要 Step 2 的组件列表来渲染矩阵
+        if step_num == 3:
+            step2_data = get_step_result(conv_id, "components")
+            card_data["all_components"] = step2_data.get("all_components", [])
         card = {
             "step": step_num,
             "title": get_step_label(step_name),
             "status": "current",
             "saved": True,
-            "data": args,
+            "data": card_data,
         }
         return {"status": "saved", "message": f"{get_step_label(step_name)}结果已保存，请确认", "card_data": card}
 
@@ -437,15 +465,94 @@ def _execute_tool(func_name: str, args: dict, conv_id: str) -> dict:
     """执行工具调用并返回结果"""
     if func_name in ARIZ_TOOL_MAP:
         return handle_ariz_tool_call(conv_id, func_name, args)
-    elif func_name == "llm_wiki" and "llm_wiki" in SKILLS:
-        try:
-            return SKILLS["llm_wiki"]["func"](**args)
-        except Exception as e:
-            return {"error": str(e)}
     return {"error": f"未知工具: {func_name}"}
 
 
 # ============ 聊天接口 ============
+
+def _build_fallback_args(conv_id: str, step: str, llm_text: str = "") -> dict:
+    """当 LLM 没有调用工具时，从文本回复中提取数据作为兜底"""
+    if step == "components":
+        step1 = get_step_result(conv_id, "problem")
+        if not step1:
+            return {}
+        db = step1.get("database_query", {}).get("primary_system", {})
+        db_comps = [c["name"] for c in db.get("components", [])]
+        return {
+            "supersystem": step1.get("constraints", [""])[0] if step1.get("constraints") else "",
+            "supersystem_components": [],
+            "system_name": db.get("system", {}).get("name", step1.get("problem_object", "")),
+            "all_components": db_comps,
+            "user_added": [],
+        }
+    elif step == "contacts":
+        step2 = get_step_result(conv_id, "components")
+        if not step2:
+            return {}
+        all_comp = step2.get("all_components", [])
+        contacts = []
+        for i, a in enumerate(all_comp):
+            for b in all_comp[i+1:]:
+                contacts.append({"component_a": a, "component_b": b, "contact_type": "待分析", "interface": ""})
+        return {"contacts": contacts}
+    elif step == "function":
+        # 从 Step 3 接触关系一一对应生成功能模型
+        step3 = get_step_result(conv_id, "contacts")
+        contacts = step3.get("contacts", [])
+        functions = []
+        for c in contacts:
+            a = c.get("component_a", "")
+            b = c.get("component_b", "")
+            ctype = c.get("contact_type", "")
+            if a and b:
+                func_desc = f"{a}对{b}产生{ctype}作用" if ctype else f"{a}对{b}产生作用"
+                functions.append({"source": a, "target": b, "function": func_desc, "type": "useful"})
+        if not functions:
+            functions = _extract_functions_from_text(llm_text)
+        return {"functions": functions}
+    elif step == "structure":
+        return {"structure_info": {}}
+    elif step == "summary":
+        return {"problems": {}}
+    elif step == "causal":
+        return {"causal_chains": []}
+    elif step == "keypoint":
+        return {"contradictions": {}}
+    elif step == "solution":
+        return {"solutions": []}
+    return {}
+
+
+def _extract_functions_from_text(text: str) -> list:
+    """从 LLM 文本回复中提取功能关系"""
+    import re
+    functions = []
+    # 匹配格式: "A → B：功能描述" 或 "A 对 B 的功能描述"
+    patterns = [
+        r'([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*[→\-\->]+\s*([\u4e00-\u9fa5a-zA-Z0-9_]+)[:：]\s*(.+)',
+        r'([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*对\s*([\u4e00-\u9fa5a-zA-Z0-9_]+)[:：]\s*(.+)',
+        r'([\u4e00-\u9fa5a-zA-Z0-9_]+)\s*→\s*([\u4e00-\u9fa5a-zA-Z0-9_]+)[:：]\s*(.+)',
+    ]
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        for pat in patterns:
+            m = re.search(pat, line)
+            if m:
+                src, tgt, func = m.group(1).strip(), m.group(2).strip(), m.group(3).strip()
+                # 简单判断类型
+                ftype = "useful"
+                if any(w in func for w in ["不足", "不够", "需要增强", "偏弱"]):
+                    ftype = "insufficient"
+                elif any(w in func for w in ["过度", "过大", "过高", "超出"]):
+                    ftype = "excessive"
+                elif any(w in func for w in ["有害", "干扰", "损伤", "破坏"]):
+                    ftype = "harmful"
+                functions.append({"source": src, "target": tgt, "function": func, "type": ftype})
+                break
+    return functions
+
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -469,32 +576,56 @@ def chat():
         tool_calls = {}
         full_response = ""
 
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "system", "content": system_prompt}] + messages,
-            tools=tools,
-            stream=True,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": system_prompt}] + messages,
+                tools=tools if tools else None,
+                stream=True,
+                timeout=120,
+            )
 
-        for chunk in response:
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
+            stream_start = time.time()
+            last_chunk_time = time.time()
+            STREAM_TIMEOUT = 300  # 整个流最大持续时间
+            CHUNK_TIMEOUT = 30    # 两个 chunk 之间的最大间隔
 
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    tc_index = tc.index
-                    if tc_index not in tool_calls:
-                        tool_calls[tc_index] = {"id": tc.id, "name": "", "arguments": ""}
-                    if tc.function:
-                        if tc.function.name:
-                            tool_calls[tc_index]["name"] = tc.function.name
-                        if tc.function.arguments:
-                            tool_calls[tc_index]["arguments"] += tc.function.arguments
+            for chunk in response:
+                now = time.time()
+                if now - stream_start > STREAM_TIMEOUT:
+                    logger.warning("stream_timeout", step=current_step, elapsed=now - stream_start)
+                    break
+                if now - last_chunk_time > CHUNK_TIMEOUT:
+                    logger.warning("chunk_timeout", step=current_step, gap=now - last_chunk_time)
+                    break
+                last_chunk_time = now
 
-            if delta.content:
-                full_response += delta.content
-                yield f'0:{json.dumps(delta.content)}\n'
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        tc_index = tc.index
+                        if tc_index not in tool_calls:
+                            tool_calls[tc_index] = {"id": tc.id, "name": "", "arguments": ""}
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls[tc_index]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls[tc_index]["arguments"] += tc.function.arguments
+
+                if delta.content:
+                    full_response += delta.content
+                    yield f'0:{json.dumps(delta.content)}\n'
+
+        except Exception as e:
+            logger.error("llm_error", error=str(e), step=current_step)
+            error_msg = f"\n\n⚠️ AI 服务暂时不可用，请稍后重试。"
+            full_response += error_msg
+            yield f'0:{json.dumps(error_msg)}\n'
+            _save_assistant_message(conv_id, full_response)
+            return
 
         # 处理工具调用
         for tc_info in tool_calls.values():
@@ -513,6 +644,96 @@ def chat():
             tool_text = f"\n\n**调用工具: {func_name}**\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
             full_response += tool_text
             yield f'0:{json.dumps(tool_text)}\n'
+
+        # === Step 3 后检查：LLM 调用了工具但 contacts 为空时，自动补充 ===
+        if current_step == "contacts" and current_step in [ARIZ_TOOL_MAP.get(tc["name"]) for tc in tool_calls.values() if tc["name"]]:
+            state_check = get_session_state(conv_id_for_flow)
+            saved_contacts = state_check["step_results"].get("contacts", {}).get("contacts", [])
+            if not saved_contacts:
+                step2_data = get_step_result(conv_id_for_flow, "components")
+                all_comp = step2_data.get("all_components", [])
+                if len(all_comp) >= 2:
+                    auto_contacts = []
+                    for i in range(len(all_comp)):
+                        for j in range(i + 1, len(all_comp)):
+                            auto_contacts.append({"component_a": all_comp[i], "component_b": all_comp[j], "contact_type": "待分析", "interface": ""})
+                    result = _execute_tool("ariz_step3_contacts", {"contacts": auto_contacts}, conv_id_for_flow)
+                    tool_text = f"\n\n**自动补充接触关系: {len(auto_contacts)}组**\n"
+                    full_response += tool_text
+                    yield f'0:{json.dumps(tool_text)}\n'
+                    logger.info("step3_auto_contacts", count=len(auto_contacts))
+
+        # === Step 4 后检查：LLM 调用了工具但 functions 为空时，从 Step 3 接触关系一一对应生成 ===
+        if current_step == "function":
+            state_check = get_session_state(conv_id_for_flow)
+            saved_funcs = state_check["step_results"].get("function", {}).get("functions", [])
+            if not saved_funcs:
+                step3 = get_step_result(conv_id_for_flow, "contacts")
+                contacts = step3.get("contacts", [])
+                if contacts:
+                    # 接触类型 → 功能类型 + 功能描述的映射
+                    contact_to_func = {
+                        "热传导": ("useful", "传导热量"),
+                        "对流换热": ("useful", "对流换热"),
+                        "换热": ("useful", "热交换"),
+                        "热传递": ("useful", "传递热量"),
+                        "温度传导": ("useful", "传导温度"),
+                        "温度监测": ("useful", "监测温度"),
+                        "接触应力": ("harmful", "产生接触应力"),
+                        "安装基面": ("useful", "提供安装支撑"),
+                        "流体压力": ("useful", "承受流体压力"),
+                        "负载反馈": ("insufficient", "负载反馈不足"),
+                        "流动阻力": ("harmful", "产生流动阻力"),
+                        "容积变化": ("useful", "补偿容积变化"),
+                        "流向控制": ("useful", "控制流向"),
+                        "密封连接": ("useful", "密封连接"),
+                        "热膨胀": ("excessive", "热膨胀过大"),
+                        "驱动循环": ("useful", "驱动冷却液循环"),
+                        "换热介质": ("useful", "作为换热介质"),
+                        "容量补偿": ("useful", "补偿容量变化"),
+                        "散热": ("useful", "散发热量"),
+                        "预加热": ("useful", "预加热电池"),
+                        "温度检测": ("useful", "检测温度"),
+                        "传导热量": ("useful", "传导热量"),
+                    }
+                    auto_funcs = []
+                    for c in contacts:
+                        a = c.get("component_a", "")
+                        b = c.get("component_b", "")
+                        ctype = c.get("contact_type", "")
+                        if a and b:
+                            # 根据接触类型匹配功能描述
+                            func_type = "useful"
+                            func_desc = f"{a}对{b}产生作用"
+                            for key, (ft, desc) in contact_to_func.items():
+                                if key in ctype:
+                                    func_type = ft
+                                    func_desc = f"{a}{desc}给{b}"
+                                    break
+                            auto_funcs.append({"source": a, "target": b, "function": func_desc, "type": func_type})
+                    if auto_funcs:
+                        result = _execute_tool("ariz_step4_function", {"functions": auto_funcs}, conv_id_for_flow)
+                        tool_text = f"\n\n**基于{len(auto_funcs)}组接触关系自动生成功能模型**\n"
+                        full_response += tool_text
+                        yield f'0:{json.dumps(tool_text)}\n'
+                        logger.info("step4_auto_functions", count=len(auto_funcs))
+
+        # 兜底：LLM 没有调用工具时，自动推进流程
+        has_tool_call = any(tc["name"] for tc in tool_calls.values())
+        if not has_tool_call and tools:
+            logger.warning("no_tool_call", step=current_step)
+            # 自动调用当前步骤的工具，用已有数据保存
+            step_tool_name = tools[0]["function"]["name"]
+            step_num = ARIZ_TOOL_MAP.get(step_tool_name)
+            if step_num:
+                # 从上一步结果推导数据
+                fallback_args = _build_fallback_args(conv_id_for_flow, current_step, full_response)
+                if fallback_args:
+                    logger.info("fallback_tool_call", tool=step_tool_name, args=list(fallback_args.keys()))
+                    result = _execute_tool(step_tool_name, fallback_args, conv_id_for_flow)
+                    tool_text = f"\n\n**调用工具: {step_tool_name}**\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
+                    full_response += tool_text
+                    yield f'0:{json.dumps(tool_text)}\n'
 
         _save_assistant_message(conv_id, full_response)
 

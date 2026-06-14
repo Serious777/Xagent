@@ -398,7 +398,6 @@ backend/skills/
 ├── battery_pack.py          # PACK 领域知识（结构/热管理/BMS）
 ├── material_db.py           # 材料数据库（电芯/导热材料/冷却液）
 ├── patent_search.py         # 专利检索分析
-└── wiki_knowledge.py        # 知识库管理（保留原 llm_wiki）
 ```
 
 ### 4.2 Skill 间协作

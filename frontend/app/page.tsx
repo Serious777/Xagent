@@ -13,7 +13,14 @@ export default function Home() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [convId, setConvId] = useState<string | null>(null);
+  const convIdRef = useRef<string | null>(null);
+  const setConvIdStable = (id: string | null) => {
+    convIdRef.current = id;
+    setConvId(id);
+  };
   const [arizStep, setArizStep] = useState<ArizStepData | null>(null);
+  const [cardExpanded, setCardExpanded] = useState(false);
+  const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -24,14 +31,14 @@ export default function Home() {
   const newChat = async () => {
     const resp = await fetch('/api/conversations', { method: 'POST' });
     const data = await resp.json();
-    setConvId(data.id);
+    setConvIdStable(data.id);
     setMessages([]);
     setInput('');
     setArizStep(null);
   };
 
   const switchChat = async (id: string) => {
-    setConvId(id);
+    setConvIdStable(id);
     const resp = await fetch(`/api/conversations/${id}/messages`);
     const data = await resp.json();
     setMessages(data.map((m: any, i: number) => ({
@@ -46,13 +53,14 @@ export default function Home() {
   const deleteChat = async (id: string) => {
     await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
     if (convId === id) {
-      setConvId(null);
+      setConvIdStable(null);
       setMessages([]);
       setArizStep(null);
     }
+    setSidebarRefreshKey(k => k + 1);
   };
 
-  useEffect(() => { if (!convId) newChat(); }, []);
+
 
   const autoGrow = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
@@ -61,6 +69,16 @@ export default function Home() {
   const send = async (overrideText?: string) => {
     const text = overrideText ?? input;
     if (!text.trim() || loading) return;
+
+    // 如果还没有对话 ID，先创建
+    let activeConvId = convId;
+    if (!activeConvId) {
+      const resp = await fetch('/api/conversations', { method: 'POST' });
+      const data = await resp.json();
+      activeConvId = data.id;
+      setConvIdStable(data.id);
+    }
+
     const userMsg: Msg = { id: Date.now().toString(), role: 'user', content: text };
     const assistantMsg: Msg = { id: (Date.now() + 1).toString(), role: 'assistant', content: '' };
     setMessages(prev => [...prev, userMsg, assistantMsg]);
@@ -76,7 +94,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          conversation_id: convId,
+          conversation_id: activeConvId,
           messages: [...messages, userMsg].map(m => ({ role: m.role, content: m.content })),
         }),
         signal: controller.signal,
@@ -118,7 +136,7 @@ export default function Home() {
   return (
     <div className="flex h-screen bg-white">
       {/* 侧边栏 */}
-      <Sidebar currentId={convId} onNew={newChat} onSwitch={switchChat} onDelete={deleteChat} />
+      <Sidebar currentId={convId} onNew={newChat} onSwitch={switchChat} onDelete={deleteChat} refreshKey={sidebarRefreshKey} />
 
       {/* 主区域 */}
       <div className="flex flex-1 min-w-0">
@@ -183,7 +201,7 @@ export default function Home() {
                     message={m}
                     onPreview={() => {}}
                     onArizStep={(stepData) => setArizStep(stepData)}
-                    conversationId={convId}
+                    conversationId={convIdRef.current}
                     onStepConfirmed={() => send('已确认，请继续下一步。')}
                   />
                 ))}
@@ -238,15 +256,55 @@ export default function Home() {
         </div>
 
         {/* 右侧：ARIZ 详情面板 */}
-        {arizStep && (
-          <div className="w-[480px] flex-shrink-0">
+        {arizStep && !cardExpanded && (
+          <div className="flex-1 min-w-0 border-l border-gray-100">
             <ArizDetailPanel
               stepData={arizStep}
               onClose={() => setArizStep(null)}
+              expanded={false}
+              onToggleExpand={() => setCardExpanded(true)}
             />
           </div>
         )}
       </div>
+
+      {/* 全屏卡片覆盖层 */}
+      {arizStep && cardExpanded && (
+        <div className="fixed inset-0 z-50 bg-white flex flex-col">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 bg-white">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-gray-900 flex items-center justify-center">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                  <path d="M2 17l10 5 10-5"/>
+                  <path d="M2 12l10 5 10-5"/>
+                </svg>
+              </div>
+              <span className="font-semibold text-[15px] text-gray-900">Xagent</span>
+              <span className="text-xs text-blue-600 bg-blue-50 px-2.5 py-1 rounded-full ml-2">
+                步骤{arizStep.step}：{arizStep.title}
+              </span>
+            </div>
+            <button
+              onClick={() => setCardExpanded(false)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M8 3v3a2 2 0 01-2 2H3m18 0h-3a2 2 0 01-2-2V3m0 18v-3a2 2 0 012-2h3M3 16h3a2 2 0 012 2v3"/>
+              </svg>
+              退出全屏
+            </button>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <ArizDetailPanel
+              stepData={arizStep}
+              onClose={() => { setArizStep(null); setCardExpanded(false); }}
+              expanded={true}
+              onToggleExpand={() => setCardExpanded(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

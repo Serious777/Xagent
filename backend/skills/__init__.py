@@ -1,5 +1,4 @@
 """Xagent Skills 注册表"""
-from skills.llm_wiki import SKILL as llm_wiki_skill
 from skills.ariz_engine import SKILL as ariz_engine_skill
 from skills.ariz_step1_problem import SKILL as ariz_step1_skill
 from skills.ariz_step2_components import SKILL as ariz_step2_skill
@@ -23,6 +22,4 @@ SKILLS = {
     "ariz_step7_causal": ariz_step7_skill,
     "ariz_step8_keypoint": ariz_step8_skill,
     "ariz_step9_solution": ariz_step9_skill,
-    # 原有技能
-    "llm_wiki": llm_wiki_skill,
 }

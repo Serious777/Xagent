@@ -14,9 +14,10 @@ interface SidebarProps {
   onNew: () => void;
   onSwitch: (id: string) => void;
   onDelete: (id: string) => void;
+  refreshKey?: number;
 }
 
-export default function Sidebar({ currentId, onNew, onSwitch, onDelete }: SidebarProps) {
+export default function Sidebar({ currentId, onNew, onSwitch, onDelete, refreshKey }: SidebarProps) {
   const [hovered, setHovered] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -28,7 +29,7 @@ export default function Sidebar({ currentId, onNew, onSwitch, onDelete }: Sideba
     setConversations(data);
   };
 
-  useEffect(() => { refresh(); }, [currentId]);
+  useEffect(() => { refresh(); }, [currentId, refreshKey]);
   useEffect(() => {
     const timer = setInterval(refresh, 5000);
     return () => clearInterval(timer);
