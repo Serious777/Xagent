@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 import structlog
 from flask import Flask, request, Response, jsonify
@@ -34,36 +35,47 @@ logger = structlog.get_logger()
 app = Flask(__name__)
 CORS(app)
 
-# ---- 对话数据库 ----
+
+# ============ 数据库连接管理 ============
+
 DB_PATH = os.path.join(os.path.dirname(__file__), "xagent.db")
 
 
+@contextmanager
 def get_db():
+    """数据库连接上下文管理器，自动提交/关闭/回滚"""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    return conn
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
-    conn = get_db()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS conversations (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL DEFAULT '新对话',
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-        );
-    """)
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '新对话',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+        """)
 
 
 init_db()
@@ -77,6 +89,30 @@ client = OpenAI(
 MODEL = os.getenv("XIAOMI_MODEL", "mimo-v2.5")
 
 logger.info("xagent_started", model=MODEL)
+
+
+# ============ 全局错误处理 ============
+
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({"error": "请求参数错误", "detail": str(e)}), 400
+
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({"error": "资源不存在"}), 404
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.error("internal_error", error=str(e))
+    return jsonify({"error": "服务器内部错误"}), 500
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error("unhandled_exception", error=str(e), type=type(e).__name__)
+    return jsonify({"error": "服务器内部错误", "detail": str(e)}), 500
 
 
 # ============ 工具定义（ARIZ 步骤 + wiki） ============
@@ -221,7 +257,6 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
 
     step_name = ARIZ_STEPS[step_num - 1][0]
 
-    # ---- Step 1 ----
     if step_num == 1:
         db_result = query_components_for_step2(args)
         step_data = {**args, "database_query": db_result}
@@ -243,13 +278,8 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
                 "database_query": db_result,
             },
         }
-        return {
-            "status": "saved",
-            "message": "问题识别结果已保存，请确认",
-            "card_data": card,
-        }
+        return {"status": "saved", "message": "问题识别结果已保存，请确认", "card_data": card}
 
-    # ---- Step 2 ----
     elif step_num == 2:
         state = get_session_state(conv_id)
         db_result = state.get("database_query", {})
@@ -259,11 +289,10 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
 
         user_added = args.get("user_added", [])
         all_components = db_comp_names + [c for c in user_added if c not in db_comp_names]
-        supersystem_components = args.get("supersystem_components", [])
 
         merged_args = {
             "supersystem": args.get("supersystem", ""),
-            "supersystem_components": supersystem_components,
+            "supersystem_components": args.get("supersystem_components", []),
             "system_name": args.get("system_name", primary_system.get("system", {}).get("name", "")),
             "all_components": all_components,
             "user_added": user_added,
@@ -275,21 +304,12 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
             "title": "系统组件分析",
             "status": "current",
             "saved": True,
-            "data": {
-                **merged_args,
-                "database_query": db_result,
-            },
+            "data": {**merged_args, "database_query": db_result},
         }
-        return {
-            "status": "saved",
-            "message": "系统组件分析结果已保存，请确认",
-            "card_data": card,
-        }
+        return {"status": "saved", "message": "系统组件分析结果已保存，请确认", "card_data": card}
 
-    # ---- Step 3-9 ----
     else:
         save_step_result(conv_id, step_name, args)
-
         card = {
             "step": step_num,
             "title": get_step_label(step_name),
@@ -297,22 +317,17 @@ def handle_ariz_tool_call(conv_id: str, tool_name: str, args: dict) -> dict:
             "saved": True,
             "data": args,
         }
-        return {
-            "status": "saved",
-            "message": f"{get_step_label(step_name)}结果已保存，请确认",
-            "card_data": card,
-        }
+        return {"status": "saved", "message": f"{get_step_label(step_name)}结果已保存，请确认", "card_data": card}
 
 
 # ============ 对话 API ============
 
 @app.route("/api/conversations", methods=["GET"])
 def list_conversations():
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, created_at, updated_at FROM conversations ORDER BY updated_at DESC"
+        ).fetchall()
     return jsonify([dict(r) for r in rows])
 
 
@@ -320,13 +335,11 @@ def list_conversations():
 def create_conversation():
     conv_id = str(uuid.uuid4())[:8]
     now = datetime.now().isoformat()
-    conn = get_db()
-    conn.execute(
-        "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        (conv_id, "新对话", now, now),
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (conv_id, "新对话", now, now),
+        )
     reset_flow(conv_id)
     logger.info("conversation_created", id=conv_id)
     return jsonify({"id": conv_id, "title": "新对话", "created_at": now, "updated_at": now})
@@ -334,11 +347,9 @@ def create_conversation():
 
 @app.route("/api/conversations/<conv_id>", methods=["DELETE"])
 def delete_conversation(conv_id):
-    conn = get_db()
-    conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
-    conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
     reset_flow(conv_id)
     logger.info("conversation_deleted", id=conv_id)
     return jsonify({"ok": True})
@@ -348,25 +359,90 @@ def delete_conversation(conv_id):
 def update_conversation(conv_id):
     data = request.json
     title = data.get("title", "")
-    conn = get_db()
-    conn.execute(
-        "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-        (title, datetime.now().isoformat(), conv_id),
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (title, datetime.now().isoformat(), conv_id),
+        )
     return jsonify({"ok": True})
 
 
 @app.route("/api/conversations/<conv_id>/messages", methods=["GET"])
 def get_messages(conv_id):
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id",
-        (conv_id,),
-    ).fetchall()
-    conn.close()
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY id",
+            (conv_id,),
+        ).fetchall()
     return jsonify([dict(r) for r in rows])
+
+
+# ============ 聊天辅助函数 ============
+
+def _save_user_message(conv_id: str, messages: list):
+    """保存用户消息到数据库，自动创建对话并设置标题"""
+    last_user_msg = None
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            last_user_msg = m
+            break
+    if not last_user_msg:
+        return
+
+    with get_db() as conn:
+        exists = conn.execute(
+            "SELECT id FROM conversations WHERE id = ?", (conv_id,)
+        ).fetchone()
+        if not exists:
+            now = datetime.now().isoformat()
+            conn.execute(
+                "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (conv_id, "新对话", now, now),
+            )
+
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (conv_id, "user", last_user_msg["content"], datetime.now().isoformat()),
+        )
+
+        msg_count = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+            (conv_id,),
+        ).fetchone()[0]
+        if msg_count == 1:
+            title = last_user_msg["content"][:30]
+            conn.execute(
+                "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+                (title, datetime.now().isoformat(), conv_id),
+            )
+
+        conn.execute(
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (datetime.now().isoformat(), conv_id),
+        )
+
+
+def _save_assistant_message(conv_id: str, content: str):
+    """保存助手回复到数据库"""
+    if not conv_id or not content:
+        return
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+            (conv_id, "assistant", content, datetime.now().isoformat()),
+        )
+
+
+def _execute_tool(func_name: str, args: dict, conv_id: str) -> dict:
+    """执行工具调用并返回结果"""
+    if func_name in ARIZ_TOOL_MAP:
+        return handle_ariz_tool_call(conv_id, func_name, args)
+    elif func_name == "llm_wiki" and "llm_wiki" in SKILLS:
+        try:
+            return SKILLS["llm_wiki"]["func"](**args)
+        except Exception as e:
+            return {"error": str(e)}
+    return {"error": f"未知工具: {func_name}"}
 
 
 # ============ 聊天接口 ============
@@ -379,42 +455,8 @@ def chat():
 
     logger.info("chat_received", message_count=len(messages), conversation_id=conv_id)
 
-    # 保存用户消息
     if conv_id and messages:
-        last_user_msg = None
-        for m in reversed(messages):
-            if m.get("role") == "user":
-                last_user_msg = m
-                break
-        if last_user_msg:
-            conn = get_db()
-            exists = conn.execute("SELECT id FROM conversations WHERE id = ?", (conv_id,)).fetchone()
-            if not exists:
-                now = datetime.now().isoformat()
-                conn.execute(
-                    "INSERT INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (conv_id, "新对话", now, now),
-                )
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (conv_id, "user", last_user_msg["content"], datetime.now().isoformat()),
-            )
-            msg_count = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
-                (conv_id,),
-            ).fetchone()[0]
-            if msg_count == 1:
-                title = last_user_msg["content"][:30]
-                conn.execute(
-                    "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
-                    (title, datetime.now().isoformat(), conv_id),
-                )
-            conn.execute(
-                "UPDATE conversations SET updated_at = ? WHERE id = ?",
-                (datetime.now().isoformat(), conv_id),
-            )
-            conn.commit()
-            conn.close()
+        _save_user_message(conv_id, messages)
 
     def generate():
         conv_id_for_flow = conv_id or "default"
@@ -466,37 +508,20 @@ def chat():
                 args = {}
 
             logger.info("tool_called", tool=func_name, args=list(args.keys()))
+            result = _execute_tool(func_name, args, conv_id_for_flow)
 
-            if func_name in ARIZ_TOOL_MAP:
-                result = handle_ariz_tool_call(conv_id_for_flow, func_name, args)
-            elif func_name == "llm_wiki" and "llm_wiki" in SKILLS:
-                try:
-                    result = SKILLS["llm_wiki"]["func"](**args)
-                except Exception as e:
-                    result = {"error": str(e)}
-            else:
-                result = {"error": f"未知工具: {func_name}"}
-
-            # 输出工具结果（含 card_data 供前端渲染卡片）
             tool_text = f"\n\n**调用工具: {func_name}**\n```json\n{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
             full_response += tool_text
             yield f'0:{json.dumps(tool_text)}\n'
 
-        # 保存助手回复
-        if conv_id and full_response:
-            conn = get_db()
-            conn.execute(
-                "INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, ?, ?, ?)",
-                (conv_id, "assistant", full_response, datetime.now().isoformat()),
-            )
-            conn.commit()
-            conn.close()
+        _save_assistant_message(conv_id, full_response)
 
     return Response(generate(), mimetype="text/plain; charset=utf-8",
                     headers={"X-Vercel-AI-Data-Stream": "v1"})
 
 
 # ---- ARIZ 流程状态查询 ----
+
 @app.route("/api/ariz/status/<conv_id>", methods=["GET"])
 def ariz_status(conv_id):
     state = get_session_state(conv_id)
@@ -514,15 +539,12 @@ def ariz_confirm(conv_id):
     """用户确认当前步骤，推进到下一步"""
     state = get_session_state(conv_id)
     current_step = state["current_step"]
-    current_idx = get_step_index(current_step)
     current_label = get_step_label(current_step)
 
-    # 检查是否有保存的结果
     step_result = get_step_result(conv_id, current_step)
     if not step_result:
         return jsonify({"ok": False, "error": f"{current_label}尚未保存结果"}), 400
 
-    # 推进到下一步
     next_step = advance_step(conv_id)
 
     if next_step:
@@ -532,7 +554,7 @@ def ariz_confirm(conv_id):
             "current_step": next_step,
             "current_step_index": get_step_index(next_step) + 1,
             "message": f"{current_label}已确认，进入{next_label}",
-            "card_status": "done",  # 前端用这个把卡片状态从 current 改为 done
+            "card_status": "done",
         })
     else:
         return jsonify({
@@ -545,6 +567,7 @@ def ariz_confirm(conv_id):
 
 
 # ---- Skill 列表 ----
+
 @app.route("/api/skills", methods=["GET"])
 def list_skills():
     return jsonify([

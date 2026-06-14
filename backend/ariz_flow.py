@@ -1,10 +1,41 @@
-"""ARIZ 流程状态机 — 管理对话中的 ARIZ 步骤流转"""
+"""ARIZ 流程状态机 — 管理对话中的 ARIZ 步骤流转（SQLite 持久化）"""
 import json
+import os
+import sqlite3
 from datetime import datetime
 import structlog
 from component_db import search_system, get_system_components
 
 logger = structlog.get_logger()
+
+# ---- 数据库 ----
+_DB_PATH = os.path.join(os.path.dirname(__file__), "xagent.db")
+
+
+def _get_db():
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _init_ariz_table():
+    conn = _get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ariz_sessions (
+            conv_id TEXT PRIMARY KEY,
+            current_step TEXT NOT NULL DEFAULT 'problem',
+            step_results TEXT NOT NULL DEFAULT '{}',
+            step_history TEXT NOT NULL DEFAULT '[]',
+            updated_at TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+_init_ariz_table()
+
 
 # 步骤定义：name → (中文名, 所需输入)
 ARIZ_STEPS = [
@@ -51,7 +82,6 @@ def build_progress(current_step: str) -> str:
 def build_system_prompt(current_step: str, state: dict = None) -> str:
     """构建 ARIZ 专用 system prompt"""
     progress = build_progress(current_step)
-    idx = get_step_index(current_step)
 
     step_guides = {
         "problem": """你是 ARIZ 创新流程引导师，当前在第1步「问题识别」。
@@ -173,8 +203,6 @@ def build_system_prompt(current_step: str, state: dict = None) -> str:
     }
 
     step_guide = step_guides.get(current_step, "")
-
-    # 历史结果注入
     history = inject_history(state.get("step_results", {})) if state else ""
 
     return f"""你是一个专注于动力电池 PACK 创新的 AI Agent，基于 TRIZ ARIZ 方法论引导工程师完成系统化创新分析。
@@ -199,27 +227,59 @@ def build_system_prompt(current_step: str, state: dict = None) -> str:
 - 用户确认后直接调用工具推进下一步，不要重复展示已确认的内容"""
 
 
-# ========== 流程状态管理（基于会话内存） ==========
-
-# 会话状态：{ conversation_id: { "current_step": str, "step_results": dict, "step_history": list } }
-_session_states = {}
+# ========== 流程状态管理（SQLite 持久化） ==========
 
 
 def get_session_state(conv_id: str) -> dict:
     """获取会话的 ARIZ 状态，不存在则初始化"""
-    if conv_id not in _session_states:
-        _session_states[conv_id] = {
+    conn = _get_db()
+    row = conn.execute(
+        "SELECT current_step, step_results, step_history FROM ariz_sessions WHERE conv_id = ?",
+        (conv_id,),
+    ).fetchone()
+
+    if row:
+        state = {
+            "current_step": row["current_step"],
+            "step_results": json.loads(row["step_results"]),
+            "step_history": json.loads(row["step_history"]),
+        }
+    else:
+        state = {
             "current_step": "problem",
             "step_results": {},
             "step_history": [],
         }
-    return _session_states[conv_id]
+        conn.execute(
+            "INSERT INTO ariz_sessions (conv_id, current_step, step_results, step_history, updated_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (conv_id, state["current_step"], json.dumps(state["step_results"]),
+             json.dumps(state["step_history"]), datetime.now().isoformat()),
+        )
+        conn.commit()
+
+    conn.close()
+    return state
+
+
+def _save_session_state(conv_id: str, state: dict):
+    """将状态持久化到 SQLite"""
+    conn = _get_db()
+    conn.execute(
+        "UPDATE ariz_sessions SET current_step = ?, step_results = ?, step_history = ?, updated_at = ? "
+        "WHERE conv_id = ?",
+        (state["current_step"], json.dumps(state["step_results"]),
+         json.dumps(state["step_history"]), datetime.now().isoformat(), conv_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def set_session_step(conv_id: str, step: str):
     """设置当前步骤"""
     state = get_session_state(conv_id)
     state["current_step"] = step
+    _save_session_state(conv_id, state)
     logger.info("ariz_step_changed", conv_id=conv_id, step=step)
 
 
@@ -227,6 +287,7 @@ def save_step_result(conv_id: str, step: str, result: dict):
     """保存某步的分析结果"""
     state = get_session_state(conv_id)
     state["step_results"][step] = result
+    _save_session_state(conv_id, state)
 
 
 def get_step_result(conv_id: str, step: str) -> dict:
@@ -240,13 +301,13 @@ def advance_step(conv_id: str) -> str:
     state = get_session_state(conv_id)
     idx = get_step_index(state["current_step"])
     if idx < len(ARIZ_STEPS) - 1:
-        # 记录当前步骤确认时间
         state["step_history"].append({
             "step": state["current_step"],
             "confirmed_at": datetime.now().isoformat(),
         })
         next_step = ARIZ_STEPS[idx + 1][0]
         state["current_step"] = next_step
+        _save_session_state(conv_id, state)
         return next_step
     return None
 
@@ -258,28 +319,36 @@ def rollback_to_step(conv_id: str, target_step: str) -> dict:
     if target_idx < 0:
         return {"error": f"未知步骤: {target_step}"}
 
-    # 删除目标步骤及之后的所有结果
     for step_name, _ in ARIZ_STEPS[target_idx:]:
         state["step_results"].pop(step_name, None)
 
-    # 清空目标步骤之后的历史
     state["step_history"] = [
         h for h in state["step_history"]
         if get_step_index(h["step"]) < target_idx
     ]
 
     state["current_step"] = target_step
+    _save_session_state(conv_id, state)
     logger.info("ariz_rolled_back", conv_id=conv_id, target=target_step)
     return {"rolled_back_to": target_step, "message": f"已回退到：{get_step_label(target_step)}"}
 
 
 def reset_flow(conv_id: str):
     """重置流程"""
-    _session_states[conv_id] = {
+    state = {
         "current_step": "problem",
         "step_results": {},
         "step_history": [],
     }
+    conn = _get_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO ariz_sessions (conv_id, current_step, step_results, step_history, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (conv_id, state["current_step"], json.dumps(state["step_results"]),
+         json.dumps(state["step_history"]), datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
 
 
 # ========== 历史结果注入 ==========
@@ -290,17 +359,22 @@ def _summarize_step_result(step_name: str, result: dict) -> str:
     if step_name == "problem":
         d = result.get("step1_result", result)
         lines = []
-        if d.get("problem_object"): lines.append(f"- 问题对象：{d['problem_object']}")
-        if d.get("phenomenon"): lines.append(f"- 现象：{d['phenomenon']}")
-        if d.get("goal"): lines.append(f"- 目标：{d['goal']}")
-        if d.get("constraints"): lines.append(f"- 约束：{'、'.join(d['constraints'])}")
-        if d.get("contradiction_hint"): lines.append(f"- 矛盾方向：{d['contradiction_hint']}")
-        # 注入数据库查询结果，让 LLM 在 Step 2 知道有哪些组件
+        if d.get("problem_object"):
+            lines.append(f"- 问题对象：{d['problem_object']}")
+        if d.get("phenomenon"):
+            lines.append(f"- 现象：{d['phenomenon']}")
+        if d.get("goal"):
+            lines.append(f"- 目标：{d['goal']}")
+        if d.get("constraints"):
+            lines.append(f"- 约束：{'、'.join(d['constraints'])}")
+        if d.get("contradiction_hint"):
+            lines.append(f"- 矛盾方向：{d['contradiction_hint']}")
         db_query = result.get("database_query", {})
         primary = db_query.get("primary_system", {})
         if primary:
             sys_info = primary.get("system", {})
-            if sys_info.get("name"): lines.append(f"- 匹配系统：{sys_info['name']}")
+            if sys_info.get("name"):
+                lines.append(f"- 匹配系统：{sys_info['name']}")
             comps = primary.get("components", [])
             if comps:
                 comp_names = [c["name"] for c in comps]
@@ -310,8 +384,10 @@ def _summarize_step_result(step_name: str, result: dict) -> str:
     elif step_name == "components":
         d = result.get("step2_result", result)
         lines = []
-        if d.get("supersystem"): lines.append(f"- 超系统：{d['supersystem']}")
-        if d.get("system_name"): lines.append(f"- 系统：{d['system_name']}")
+        if d.get("supersystem"):
+            lines.append(f"- 超系统：{d['supersystem']}")
+        if d.get("system_name"):
+            lines.append(f"- 系统：{d['system_name']}")
         comps = d.get("all_components", [])
         if comps:
             comp_names = [c if isinstance(c, str) else c.get("name", str(c)) for c in comps]
@@ -322,7 +398,7 @@ def _summarize_step_result(step_name: str, result: dict) -> str:
         contacts = result.get("contacts", [])
         lines = [f"- 共{len(contacts)}个接触关系"]
         for c in contacts[:5]:
-            lines.append(f"  {c.get('component_a','')} ↔ {c.get('component_b','')}：{c.get('contact_type','')}")
+            lines.append(f"  {c.get('component_a', '')} ↔ {c.get('component_b', '')}：{c.get('contact_type', '')}")
         return "\n".join(lines)
 
     elif step_name == "function":
@@ -331,7 +407,7 @@ def _summarize_step_result(step_name: str, result: dict) -> str:
         lines = [f"- 共{len(funcs)}个功能"]
         for f in funcs[:5]:
             t = type_map.get(f.get("type", ""), f.get("type", ""))
-            lines.append(f"  {f.get('source','')} → {f.get('function','')} → {f.get('target','')}（{t}）")
+            lines.append(f"  {f.get('source', '')} → {f.get('function', '')} → {f.get('target', '')}（{t}）")
         return "\n".join(lines)
 
     else:
@@ -369,7 +445,6 @@ def query_components_for_step2(step1_result: dict) -> dict:
         systems = search_system(kw)
         all_systems.extend(systems)
 
-    # 去重
     seen_ids = set()
     unique_systems = []
     for s in all_systems:
@@ -380,7 +455,6 @@ def query_components_for_step2(step1_result: dict) -> dict:
     if not unique_systems:
         return {"error": f"关键词 {keywords} 未匹配到任何系统", "matched_systems": []}
 
-    # 取第一个匹配的系统（通常是最相关的）
     primary_system = unique_systems[0]
     system_data = get_system_components(primary_system["id"])
 
