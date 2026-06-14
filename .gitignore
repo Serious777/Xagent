@@ -3,7 +3,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
-.env
 venv/
 .venv/
 *.egg-info/
@@ -27,6 +26,10 @@ Thumbs.db
 # Logs
 *.log
 
+# Environment variables (NEVER commit)
+.env
+.env.*
+
 # Build artifacts
 frontend/.next/
 frontend/out/
@@ -40,13 +43,8 @@ screenshot.png
 node_modules/
 package-lock.json
 
-# Python test
-__pycache__/
-*.pyc
-
-# Environment
-.env
-node_modules/
-screenshots/
+# Dev scripts
 test-chat.mjs
-frontend/.next/
+
+# Misc
+*.tsbuildinfo
