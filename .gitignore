@@ -28,7 +28,8 @@ Thumbs.db
 
 # Environment variables (NEVER commit)
 .env
-.env.*
+.env.local
+.env.*!.env.example
 
 # Build artifacts
 frontend/.next/

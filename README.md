@@ -52,16 +52,15 @@ source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # 配置环境变量
-cp .env.example .env       # 没有 .env.example 则手动创建
-# 编辑 .env，填入以下内容：
-#   XIAOMI_API_KEY=你的API密钥
-#   XIAOMI_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-#   XIAOMI_MODEL=mimo-v2.5
+cp .env.example .env
+# 编辑 .env，填入你的 API Key：
+#   XIAOMI_API_KEY=your-api-key-here
 
-# 初始化组件知识库
+# 组件知识库会在后端启动时自动建表（读取 db_schema.sql）
+# 首次运行可导入种子数据（动力电池PACK常见组件 50+ 个）：
 python seed_components.py
 
-# 启动服务
+# 启动服务（自动建表）
 python app.py
 ```
 
