@@ -613,13 +613,24 @@ def _chat_with_langgraph(data, conv_id, messages):
             finally:
                 loop.close()
 
-            # 输出卡片数据（匹配前端正则格式）
+            # 输出卡片数据（匹配前端 parseArizSteps 正则格式）
             card_data = result.get("card_data", {})
             if card_data and card_data.get("step"):
                 step_num = card_data["step"]
                 step_name = ["", "problem", "components", "contacts", "function",
                              "structure", "summary", "causal", "keypoint", "solution"][step_num]
-                tool_text = f"\n\n**调用工具: ariz_step{step_num}_{step_name}**\n```json\n{json.dumps(card_data, ensure_ascii=False, indent=2)}\n```\n"
+                # 包装成前端期望的格式
+                tool_result = {
+                    "card_data": {
+                        "step": card_data["step"],
+                        "title": card_data.get("title", ""),
+                        "data": card_data.get("data", {}),
+                        "saved": card_data.get("saved", True),
+                        "status": card_data.get("status", "current"),
+                    },
+                    "status": "saved",
+                }
+                tool_text = f"\n\n**调用工具: ariz_step{step_num}_{step_name}**\n```json\n{json.dumps(tool_result, ensure_ascii=False, indent=2)}\n```\n"
                 yield f'0:{json.dumps(tool_text)}\n'
 
             # 输出回复
