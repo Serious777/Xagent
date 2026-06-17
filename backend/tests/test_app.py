@@ -94,7 +94,10 @@ class TestFlaskAPI(unittest.TestCase):
         conv_id = json.loads(resp.data)["id"]
 
         resp = self.client.post(f"/api/ariz/confirm/{conv_id}")
-        self.assertEqual(resp.status_code, 400)
+        # 新引擎：confirm 返回当前步骤（problem），不会报错
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.data)
+        self.assertTrue(data["ok"])
 
     def test_list_skills(self):
         resp = self.client.get("/api/skills")
