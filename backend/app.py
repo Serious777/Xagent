@@ -25,6 +25,7 @@ try:
     from ariz_graph import get_ariz_graph
     from ariz_state import create_initial_state
     from ariz_tools import parse_tool_calls
+    from agent import get_agent
     LANGGRAPH_AVAILABLE = True
 except ImportError:
     LANGGRAPH_AVAILABLE = False
@@ -586,23 +587,28 @@ def chat():
 
 
 def _chat_with_langgraph(data, conv_id, messages):
-    """使用 LangGraph 引擎处理聊天"""
-    graph = get_ariz_graph()
+    """使用 Deep Agents + LangGraph 引擎处理聊天"""
+    agent = get_agent()
 
     def generate():
         try:
-            # 构建初始状态
-            state = create_initial_state()
-            state["messages"] = messages
-            state["thread_id"] = conv_id or "default"
+            # 获取用户最新消息
+            user_msg = ""
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    user_msg = m["content"]
+                    break
 
-            # 运行图
+            # 获取或创建状态
+            state = agent.get_state(conv_id or "default")
+
+            # 运行 Agent
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
             try:
                 result = loop.run_until_complete(
-                    graph.ainvoke(state, config={"configurable": {"thread_id": conv_id or "default"}})
+                    agent.run(user_msg, state=state, thread_id=conv_id or "default")
                 )
             finally:
                 loop.close()
@@ -613,22 +619,16 @@ def _chat_with_langgraph(data, conv_id, messages):
                 tool_text = f"\n\n**步骤 {card_data.get('step', '?')}：{card_data.get('title', '')}**\n"
                 yield f'0:{json.dumps(tool_text)}\n'
 
-            # 输出 LLM 回复
-            if result.get("messages"):
-                last_msg = result["messages"][-1]
-                if hasattr(last_msg, "content") and last_msg.content:
-                    yield f'0:{json.dumps(last_msg.content)}\n'
+            # 输出回复
+            response = result.get("response", "")
+            if response:
+                yield f'0:{json.dumps(response)}\n'
 
             # 保存消息
-            full_response = ""
-            if result.get("messages"):
-                last_msg = result["messages"][-1]
-                if hasattr(last_msg, "content"):
-                    full_response = last_msg.content
-            _save_assistant_message(conv_id, full_response)
+            _save_assistant_message(conv_id, response)
 
         except Exception as e:
-            logger.error("langgraph_error", error=str(e))
+            logger.error("deep_agent_error", error=str(e))
             error_msg = f"\n\n⚠️ AI 服务暂时不可用，请稍后重试。"
             yield f'0:{json.dumps(error_msg)}\n'
 
