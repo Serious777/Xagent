@@ -20,6 +20,17 @@ from ariz_flow import (
 )
 from component_db import init_db as init_component_db
 
+# LangGraph + Deep Agents 新引擎（USE_LANGGRAPH=true 时启用）
+try:
+    from ariz_graph import get_ariz_graph
+    from ariz_state import create_initial_state
+    from ariz_tools import parse_tool_calls
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+
+import asyncio
+
 load_dotenv()
 
 # ---- 结构化日志 ----
@@ -565,6 +576,69 @@ def chat():
     if conv_id and messages:
         _save_user_message(conv_id, messages)
 
+    # 判断使用新引擎还是旧引擎
+    use_langgraph = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
+
+    if use_langgraph and LANGGRAPH_AVAILABLE:
+        return _chat_with_langgraph(data, conv_id, messages)
+    else:
+        return _chat_legacy(data, conv_id, messages)
+
+
+def _chat_with_langgraph(data, conv_id, messages):
+    """使用 LangGraph 引擎处理聊天"""
+    graph = get_ariz_graph()
+
+    def generate():
+        try:
+            # 构建初始状态
+            state = create_initial_state()
+            state["messages"] = messages
+            state["thread_id"] = conv_id or "default"
+
+            # 运行图
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            try:
+                result = loop.run_until_complete(
+                    graph.ainvoke(state, config={"configurable": {"thread_id": conv_id or "default"}})
+                )
+            finally:
+                loop.close()
+
+            # 输出卡片数据
+            card_data = result.get("card_data", {})
+            if card_data:
+                tool_text = f"\n\n**步骤 {card_data.get('step', '?')}：{card_data.get('title', '')}**\n"
+                yield f'0:{json.dumps(tool_text)}\n'
+
+            # 输出 LLM 回复
+            if result.get("messages"):
+                last_msg = result["messages"][-1]
+                if hasattr(last_msg, "content") and last_msg.content:
+                    yield f'0:{json.dumps(last_msg.content)}\n'
+
+            # 保存消息
+            full_response = ""
+            if result.get("messages"):
+                last_msg = result["messages"][-1]
+                if hasattr(last_msg, "content"):
+                    full_response = last_msg.content
+            _save_assistant_message(conv_id, full_response)
+
+        except Exception as e:
+            logger.error("langgraph_error", error=str(e))
+            error_msg = f"\n\n⚠️ AI 服务暂时不可用，请稍后重试。"
+            yield f'0:{json.dumps(error_msg)}\n'
+
+    return Response(generate(), mimetype="text/plain; charset=utf-8",
+                    headers={"X-Vercel-AI-Data-Stream": "v1"})
+
+
+def _chat_legacy(data, conv_id, messages):
+    """旧引擎处理聊天（保持原有逻辑不变）"""
+
     def generate():
         conv_id_for_flow = conv_id or "default"
         state = get_session_state(conv_id_for_flow)
@@ -745,8 +819,18 @@ def chat():
 
 @app.route("/api/ariz/status/<conv_id>", methods=["GET"])
 def ariz_status(conv_id):
-    state = get_session_state(conv_id)
-    return jsonify(state)
+    use_langgraph = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
+    if use_langgraph and LANGGRAPH_AVAILABLE:
+        try:
+            graph = get_ariz_graph()
+            config = {"configurable": {"thread_id": conv_id}}
+            snapshot = graph.get_state(config)
+            return jsonify(snapshot.values if snapshot else {"error": "no state"})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    else:
+        state = get_session_state(conv_id)
+        return jsonify(state)
 
 
 @app.route("/api/ariz/reset/<conv_id>", methods=["POST"])
