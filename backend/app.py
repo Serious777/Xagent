@@ -821,13 +821,17 @@ def _chat_legacy(data, conv_id, messages):
 def ariz_status(conv_id):
     use_langgraph = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
     if use_langgraph and LANGGRAPH_AVAILABLE:
-        try:
-            graph = get_ariz_graph()
-            config = {"configurable": {"thread_id": conv_id}}
-            snapshot = graph.get_state(config)
-            return jsonify(snapshot.values if snapshot else {"error": "no state"})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        agent = get_agent()
+        state = agent.get_state(conv_id)
+        # 转换 LangChain messages 为可序列化格式
+        serializable_state = {
+            "current_step": state.get("current_step"),
+            "step_results": state.get("step_results", {}),
+            "card_data": state.get("card_data", {}),
+            "error": state.get("error"),
+            "message_count": len(state.get("messages", [])),
+        }
+        return jsonify(serializable_state)
     else:
         state = get_session_state(conv_id)
         return jsonify(state)
@@ -842,33 +846,43 @@ def ariz_reset(conv_id):
 @app.route("/api/ariz/confirm/<conv_id>", methods=["POST"])
 def ariz_confirm(conv_id):
     """用户确认当前步骤，推进到下一步"""
-    state = get_session_state(conv_id)
-    current_step = state["current_step"]
-    current_label = get_step_label(current_step)
+    use_langgraph = os.getenv("USE_LANGGRAPH", "false").lower() == "true"
 
-    step_result = get_step_result(conv_id, current_step)
-    if not step_result:
-        return jsonify({"ok": False, "error": f"{current_label}尚未保存结果"}), 400
-
-    next_step = advance_step(conv_id)
-
-    if next_step:
-        next_label = get_step_label(next_step)
-        return jsonify({
-            "ok": True,
-            "current_step": next_step,
-            "current_step_index": get_step_index(next_step) + 1,
-            "message": f"{current_label}已确认，进入{next_label}",
-            "card_status": "done",
-        })
+    if use_langgraph and LANGGRAPH_AVAILABLE:
+        agent = get_agent()
+        result = agent.confirm_step(conv_id)
+        if result.get("ok"):
+            return jsonify({**result, "card_status": "done"})
+        else:
+            return jsonify(result), 400
     else:
-        return jsonify({
-            "ok": True,
-            "current_step": None,
-            "message": "ARIZ 全部流程已完成！",
-            "card_status": "done",
-            "all_results": {k: v for k, v in state["step_results"].items()},
-        })
+        state = get_session_state(conv_id)
+        current_step = state["current_step"]
+        current_label = get_step_label(current_step)
+
+        step_result = get_step_result(conv_id, current_step)
+        if not step_result:
+            return jsonify({"ok": False, "error": f"{current_label}尚未保存结果"}), 400
+
+        next_step = advance_step(conv_id)
+
+        if next_step:
+            next_label = get_step_label(next_step)
+            return jsonify({
+                "ok": True,
+                "current_step": next_step,
+                "current_step_index": get_step_index(next_step) + 1,
+                "message": f"{current_label}已确认，进入{next_label}",
+                "card_status": "done",
+            })
+        else:
+            return jsonify({
+                "ok": True,
+                "current_step": None,
+                "message": "ARIZ 全部流程已完成！",
+                "card_status": "done",
+                "all_results": {k: v for k, v in state["step_results"].items()},
+            })
 
 
 # ---- Skill 列表 ----

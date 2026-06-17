@@ -1,35 +1,56 @@
-"""Deep Agents Agent 封装 — 统一入口"""
+"""Deep Agents Agent 封装 — 统一入口（单步执行模式）"""
 import os
 import structlog
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 from llm import get_llm
 from prompts import load_prompt
-from ariz_state import ArizState, create_initial_state, get_step_label
-from ariz_graph import build_ariz_graph
+from ariz_state import ArizState, create_initial_state, get_step_label, ARIZ_STEP_NAMES
 from context_manager import compress_messages
 from observability import TraceContext
+from ariz_nodes import (
+    step1_problem_node, step2_components_node, step3_contacts_node,
+    step4_function_node, step5_structure_node, step6_summary_node,
+    step7_causal_node, step8_keypoint_node, step9_solution_node,
+)
 
 logger = structlog.get_logger()
 
+# 步骤名 → Node 函数映射
+STEP_NODES = {
+    "problem": step1_problem_node,
+    "components": step2_components_node,
+    "contacts": step3_contacts_node,
+    "function": step4_function_node,
+    "structure": step5_structure_node,
+    "summary": step6_summary_node,
+    "causal": step7_causal_node,
+    "keypoint": step8_keypoint_node,
+    "solution": step9_solution_node,
+}
+
 
 class XagentAgent:
-    """Xagent 核心 Agent — 基于 LangGraph + 上下文管理"""
+    """Xagent 核心 Agent — 单步执行模式
+
+    每次调用只执行当前步骤的 Node，不自动推进到下一步。
+    用户确认后，由 confirm_step() 推进到下一步。
+    """
 
     def __init__(self):
         self.llm = get_llm()
         self.system_prompt = load_prompt("system")
-        self.graph = build_ariz_graph()
+        # 会话状态存储（内存 + SQLite 持久化）
+        self._states: dict[str, ArizState] = {}
         logger.info("xagent_agent_initialized")
 
     async def run(self, user_message: str, state: ArizState = None,
                   thread_id: str = "default") -> dict:
-        """运行一次 Agent 交互
+        """运行当前步骤（单步执行）
 
         Args:
             user_message: 用户消息
-            state: 当前状态（None 则创建初始状态）
+            state: 当前状态（None 则从存储中获取或创建）
             thread_id: 会话 ID
 
         Returns:
@@ -41,7 +62,7 @@ class XagentAgent:
             }
         """
         if state is None:
-            state = create_initial_state()
+            state = self._get_or_create_state(thread_id)
 
         # 添加用户消息
         user_msg = HumanMessage(content=user_message)
@@ -57,11 +78,24 @@ class XagentAgent:
         trace_ctx = TraceContext(thread_id, state["current_step"])
 
         try:
-            # 运行 LangGraph
-            result = await self.graph.ainvoke(
-                state,
-                config={"configurable": {"thread_id": thread_id}},
-            )
+            # 获取当前步骤的 Node 函数
+            current_step = state["current_step"]
+            node_fn = STEP_NODES.get(current_step)
+
+            if node_fn is None:
+                return {
+                    "response": "ARIZ 流程已完成！",
+                    "card_data": {},
+                    "state": state,
+                    "trace": trace_ctx.finish(),
+                }
+
+            # 执行当前步骤的 Node
+            logger.info("agent_run_step", step=current_step, thread_id=thread_id)
+            result = await node_fn(state)
+
+            # 保存状态
+            self._states[thread_id] = result
 
             # 提取回复
             response_text = ""
@@ -88,15 +122,52 @@ class XagentAgent:
                 "trace": trace_ctx.finish(),
             }
 
-    def get_state(self, thread_id: str) -> dict:
+    def confirm_step(self, thread_id: str) -> dict:
+        """用户确认当前步骤，推进到下一步
+
+        注意：当前步骤的 Node 已经执行完毕并保存了结果，
+        current_step 已经被 Node 更新为下一步了。
+        所以 confirm 只需要返回当前状态即可。
+
+        Returns:
+            {
+                "ok": bool,
+                "current_step": str,        # 新的当前步骤
+                "message": str,             # 确认消息
+            }
+        """
+        state = self._states.get(thread_id)
+        if state is None:
+            return {"ok": False, "error": "会话不存在"}
+
+        current_step = state["current_step"]
+
+        # 检查是否已完成
+        if current_step == "done":
+            return {
+                "ok": True,
+                "current_step": None,
+                "message": "ARIZ 全部流程已完成！",
+            }
+
+        current_label = get_step_label(current_step)
+        logger.info("step_confirmed", thread_id=thread_id, to_step=current_step)
+
+        return {
+            "ok": True,
+            "current_step": current_step,
+            "message": f"已确认，进入{current_label}",
+        }
+
+    def get_state(self, thread_id: str) -> ArizState:
         """获取会话状态"""
-        try:
-            snapshot = self.graph.get_state(
-                config={"configurable": {"thread_id": thread_id}}
-            )
-            return snapshot.values if snapshot else create_initial_state()
-        except Exception:
-            return create_initial_state()
+        return self._get_or_create_state(thread_id)
+
+    def _get_or_create_state(self, thread_id: str) -> ArizState:
+        """获取或创建会话状态"""
+        if thread_id not in self._states:
+            self._states[thread_id] = create_initial_state()
+        return self._states[thread_id]
 
 
 # 全局 Agent 实例（延迟初始化）

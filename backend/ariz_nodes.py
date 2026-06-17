@@ -173,8 +173,10 @@ async def step1_problem_node(state: ArizState) -> dict:
         }
 
     logger.info("node_end", step="problem", has_result=bool(step_result))
+    # 只有保存了结果才推进到下一步
+    new_step = "components" if step_result else "problem"
     return {
-        "current_step": "components",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "problem": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -243,8 +245,9 @@ async def step2_components_node(state: ArizState) -> dict:
         }
 
     logger.info("node_end", step="components", has_result=bool(step_result))
+    new_step = "contacts" if step_result else "components"
     return {
-        "current_step": "contacts",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "components": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -303,8 +306,9 @@ async def step3_contacts_node(state: ArizState) -> dict:
             logger.info("step3_fallback", contact_count=len(auto_contacts))
 
     logger.info("node_end", step="contacts", has_result=bool(step_result))
+    new_step = "function" if step_result else "contacts"
     return {
-        "current_step": "function",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "contacts": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -362,8 +366,9 @@ async def step4_function_node(state: ArizState) -> dict:
                 logger.info("step4_fallback", function_count=len(auto_funcs))
 
     logger.info("node_end", step="function", has_result=bool(step_result))
+    new_step = "structure" if step_result else "function"
     return {
-        "current_step": "structure",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "function": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -389,8 +394,9 @@ async def step5_structure_node(state: ArizState) -> dict:
         card_data = {"step": 5, "title": "系统结构分析", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="structure", has_result=bool(step_result))
+    new_step = "summary" if step_result else "structure"
     return {
-        "current_step": "summary",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "structure": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -416,8 +422,9 @@ async def step6_summary_node(state: ArizState) -> dict:
         card_data = {"step": 6, "title": "问题总结", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="summary", has_result=bool(step_result))
+    new_step = "causal" if step_result else "summary"
     return {
-        "current_step": "causal",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "summary": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -443,8 +450,9 @@ async def step7_causal_node(state: ArizState) -> dict:
         card_data = {"step": 7, "title": "因果链分析", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="causal", has_result=bool(step_result))
+    new_step = "keypoint" if step_result else "causal"
     return {
-        "current_step": "keypoint",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "causal": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -470,8 +478,9 @@ async def step8_keypoint_node(state: ArizState) -> dict:
         card_data = {"step": 8, "title": "关键问题", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="keypoint", has_result=bool(step_result))
+    new_step = "solution" if step_result else "keypoint"
     return {
-        "current_step": "solution",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "keypoint": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
@@ -497,8 +506,9 @@ async def step9_solution_node(state: ArizState) -> dict:
         card_data = {"step": 9, "title": "创新方案", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="solution", has_result=bool(step_result))
+    new_step = "done" if step_result else "solution"
     return {
-        "current_step": "done",
+        "current_step": new_step,
         "step_results": {**state["step_results"], "solution": step_result} if step_result else state["step_results"],
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
