@@ -1,7 +1,10 @@
-"""Deep Agents Agent 封装 — 统一入口（单步执行模式）"""
+"""Deep Agents Agent 封装 — 单步执行模式 + SQLite 持久化"""
+import json
 import os
+import sqlite3
 import structlog
-from langchain_core.messages import HumanMessage, AIMessage
+from datetime import datetime
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from llm import get_llm
 from prompts import load_prompt
@@ -29,40 +32,71 @@ STEP_NODES = {
     "solution": step9_solution_node,
 }
 
+# SQLite 数据库路径
+DB_PATH = os.path.join(os.path.dirname(__file__), "xagent.db")
+
+
+def _init_agent_table():
+    """初始化 Agent 状态表"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS agent_states (
+            thread_id TEXT PRIMARY KEY,
+            current_step TEXT NOT NULL DEFAULT 'problem',
+            step_results TEXT NOT NULL DEFAULT '{}',
+            messages_json TEXT NOT NULL DEFAULT '[]',
+            card_data TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+_init_agent_table()
+
+
+def _serialize_messages(messages: list) -> list:
+    """将 LangChain messages 序列化为 JSON 可存储格式"""
+    result = []
+    for msg in messages:
+        if isinstance(msg, SystemMessage):
+            result.append({"role": "system", "content": msg.content})
+        elif isinstance(msg, HumanMessage):
+            result.append({"role": "user", "content": msg.content})
+        elif isinstance(msg, AIMessage):
+            result.append({"role": "assistant", "content": msg.content})
+    return result
+
+
+def _deserialize_messages(messages_json: list) -> list:
+    """将 JSON 格式反序列化为 LangChain messages"""
+    result = []
+    for msg in messages_json:
+        role = msg.get("role", "")
+        content = msg.get("content", "")
+        if role == "system":
+            result.append(SystemMessage(content=content))
+        elif role == "user":
+            result.append(HumanMessage(content=content))
+        elif role == "assistant":
+            result.append(AIMessage(content=content))
+    return result
+
 
 class XagentAgent:
-    """Xagent 核心 Agent — 单步执行模式
-
-    每次调用只执行当前步骤的 Node，不自动推进到下一步。
-    用户确认后，由 confirm_step() 推进到下一步。
-    """
+    """Xagent 核心 Agent — 单步执行模式 + SQLite 持久化"""
 
     def __init__(self):
         self.llm = get_llm()
         self.system_prompt = load_prompt("system")
-        # 会话状态存储（内存 + SQLite 持久化）
-        self._states: dict[str, ArizState] = {}
         logger.info("xagent_agent_initialized")
 
     async def run(self, user_message: str, state: ArizState = None,
                   thread_id: str = "default") -> dict:
-        """运行当前步骤（单步执行）
-
-        Args:
-            user_message: 用户消息
-            state: 当前状态（None 则从存储中获取或创建）
-            thread_id: 会话 ID
-
-        Returns:
-            {
-                "response": str,           # 助手回复文本
-                "card_data": dict,          # 步骤卡片数据
-                "state": ArizState,         # 更新后的状态
-                "trace": dict,              # 追踪摘要
-            }
-        """
+        """运行当前步骤（单步执行）"""
         if state is None:
-            state = self._get_or_create_state(thread_id)
+            state = self._load_state(thread_id)
 
         # 添加用户消息
         user_msg = HumanMessage(content=user_message)
@@ -78,7 +112,6 @@ class XagentAgent:
         trace_ctx = TraceContext(thread_id, state["current_step"])
 
         try:
-            # 获取当前步骤的 Node 函数
             current_step = state["current_step"]
             node_fn = STEP_NODES.get(current_step)
 
@@ -90,12 +123,11 @@ class XagentAgent:
                     "trace": trace_ctx.finish(),
                 }
 
-            # 执行当前步骤的 Node
             logger.info("agent_run_step", step=current_step, thread_id=thread_id)
             result = await node_fn(state)
 
-            # 保存状态
-            self._states[thread_id] = result
+            # 持久化到 SQLite
+            self._save_state(thread_id, result)
 
             # 提取回复
             response_text = ""
@@ -123,26 +155,10 @@ class XagentAgent:
             }
 
     def confirm_step(self, thread_id: str) -> dict:
-        """用户确认当前步骤，推进到下一步
-
-        注意：当前步骤的 Node 已经执行完毕并保存了结果，
-        current_step 已经被 Node 更新为下一步了。
-        所以 confirm 只需要返回当前状态即可。
-
-        Returns:
-            {
-                "ok": bool,
-                "current_step": str,        # 新的当前步骤
-                "message": str,             # 确认消息
-            }
-        """
-        state = self._states.get(thread_id)
-        if state is None:
-            return {"ok": False, "error": "会话不存在"}
-
+        """用户确认当前步骤，推进到下一步"""
+        state = self._load_state(thread_id)
         current_step = state["current_step"]
 
-        # 检查是否已完成
         if current_step == "done":
             return {
                 "ok": True,
@@ -161,13 +177,49 @@ class XagentAgent:
 
     def get_state(self, thread_id: str) -> ArizState:
         """获取会话状态"""
-        return self._get_or_create_state(thread_id)
+        return self._load_state(thread_id)
 
-    def _get_or_create_state(self, thread_id: str) -> ArizState:
-        """获取或创建会话状态"""
-        if thread_id not in self._states:
-            self._states[thread_id] = create_initial_state()
-        return self._states[thread_id]
+    def _load_state(self, thread_id: str) -> ArizState:
+        """从 SQLite 加载状态"""
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT current_step, step_results, messages_json, card_data FROM agent_states WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        conn.close()
+
+        if row:
+            state = create_initial_state()
+            state["current_step"] = row["current_step"]
+            state["step_results"] = json.loads(row["step_results"])
+            state["messages"] = _deserialize_messages(json.loads(row["messages_json"]))
+            state["card_data"] = json.loads(row["card_data"])
+            state["thread_id"] = thread_id
+            return state
+        else:
+            state = create_initial_state()
+            state["thread_id"] = thread_id
+            return state
+
+    def _save_state(self, thread_id: str, state: ArizState):
+        """保存状态到 SQLite"""
+        messages_json = json.dumps(_serialize_messages(state.get("messages", [])), ensure_ascii=False)
+        step_results = json.dumps(state.get("step_results", {}), ensure_ascii=False)
+        card_data = json.dumps(state.get("card_data", {}), ensure_ascii=False)
+        now = datetime.now().isoformat()
+
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            """INSERT OR REPLACE INTO agent_states
+               (thread_id, current_step, step_results, messages_json, card_data, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (thread_id, state.get("current_step", "problem"), step_results,
+             messages_json, card_data, now),
+        )
+        conn.commit()
+        conn.close()
+        logger.info("state_saved", thread_id=thread_id, step=state.get("current_step"))
 
 
 # 全局 Agent 实例（延迟初始化）
