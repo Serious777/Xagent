@@ -20,13 +20,12 @@ BACKEND_DIR="$SCRIPT_DIR/backend"
 FRONTEND_DIR="$SCRIPT_DIR/frontend"
 
 # 参数解析
-USE_LANGGRAPH="true"
 if [[ "$1" == "--legacy" ]]; then
-    USE_LANGGRAPH="false"
-    echo -e "${YELLOW}⚠️  使用旧引擎模式${NC}"
-else
-    echo -e "${GREEN}🚀 使用 LangGraph + Deep Agents 新引擎${NC}"
+    echo -e "${RED}❌ 旧引擎已移除，请直接运行 ./start.sh${NC}"
+    exit 1
 fi
+
+echo -e "${GREEN}🚀 Xagent 启动中...${NC}"
 
 # 清理函数
 cleanup() {
@@ -68,7 +67,7 @@ echo ""
 echo "🔧 启动后端 (Flask + LangGraph)..."
 cd "$BACKEND_DIR"
 source venv/bin/activate
-USE_LANGGRAPH="$USE_LANGGRAPH" FLASK_DEBUG=false FLASK_PORT=8000 python app.py &
+USE_LANGGRAPH=true FLASK_DEBUG=false FLASK_PORT=8000 python app.py &
 BACKEND_PID=$!
 echo -e "  ${GREEN}后端已启动 (PID: $BACKEND_PID) → http://localhost:8000${NC}"
 
@@ -110,7 +109,7 @@ echo ""
 echo "  🌐 前端: http://localhost:3000"
 echo "  🔧 后端: http://localhost:8000"
 echo ""
-echo "  引擎: $([ "$USE_LANGGRAPH" = "true" ] && echo "LangGraph + Deep Agents" || echo "Legacy")"
+echo "  引擎: LangGraph + Deep Agents"
 echo ""
 echo "  按 Ctrl+C 停止所有服务"
 echo "============================================"
