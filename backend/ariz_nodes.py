@@ -309,3 +309,197 @@ async def step3_contacts_node(state: ArizState) -> dict:
         "card_data": card_data,
         "messages": state["messages"] + [AIMessage(content=response.content)],
     }
+
+
+# ============ Step 4 Node ============
+
+async def step4_function_node(state: ArizState) -> dict:
+    """Step 4: 功能建模"""
+    logger.info("node_start", step="function")
+    llm = get_llm()
+    tool = get_tool_for_step("function")
+    messages = build_messages_for_step(state, "function")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step4_function" in tool_results:
+        functions = tool_results["ariz_step4_function"].get("functions", [])
+        step_result = {"functions": functions}
+        card_data = {
+            "step": 4, "title": "功能建模", "status": "current", "saved": True,
+            "data": step_result,
+        }
+
+    # 兜底：从 Step 3 接触关系生成功能模型
+    if not step_result:
+        step3 = state["step_results"].get("contacts", {})
+        contacts = step3.get("contacts", [])
+        if contacts:
+            contact_to_func = {
+                "热传导": ("useful", "传导热量"), "对流换热": ("useful", "对流换热"),
+                "换热": ("useful", "热交换"), "热传递": ("useful", "传递热量"),
+                "温度监测": ("useful", "监测温度"), "接触应力": ("harmful", "产生接触应力"),
+                "安装基面": ("useful", "提供安装支撑"), "流动阻力": ("harmful", "产生流动阻力"),
+                "热膨胀": ("excessive", "热膨胀过大"), "驱动循环": ("useful", "驱动冷却液循环"),
+                "散热": ("useful", "散发热量"), "预加热": ("useful", "预加热电池"),
+            }
+            auto_funcs = []
+            for c in contacts:
+                a, b, ctype = c.get("component_a", ""), c.get("component_b", ""), c.get("contact_type", "")
+                if a and b:
+                    func_type, func_desc = "useful", f"{a}对{b}产生作用"
+                    for key, (ft, desc) in contact_to_func.items():
+                        if key in ctype:
+                            func_type, func_desc = ft, f"{a}{desc}给{b}"
+                            break
+                    auto_funcs.append({"source": a, "target": b, "function": func_desc, "type": func_type})
+            if auto_funcs:
+                step_result = {"functions": auto_funcs}
+                card_data = {"step": 4, "title": "功能建模", "status": "current", "saved": True, "data": step_result}
+                logger.info("step4_fallback", function_count=len(auto_funcs))
+
+    logger.info("node_end", step="function", has_result=bool(step_result))
+    return {
+        "current_step": "structure",
+        "step_results": {**state["step_results"], "function": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
+
+
+# ============ Step 5 Node ============
+
+async def step5_structure_node(state: ArizState) -> dict:
+    """Step 5: 系统结构分析"""
+    logger.info("node_start", step="structure")
+    llm = get_llm()
+    tool = get_tool_for_step("structure")
+    messages = build_messages_for_step(state, "structure")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step5_structure" in tool_results:
+        step_result = tool_results["ariz_step5_structure"]
+        card_data = {"step": 5, "title": "系统结构分析", "status": "current", "saved": True, "data": step_result}
+
+    logger.info("node_end", step="structure", has_result=bool(step_result))
+    return {
+        "current_step": "summary",
+        "step_results": {**state["step_results"], "structure": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
+
+
+# ============ Step 6 Node ============
+
+async def step6_summary_node(state: ArizState) -> dict:
+    """Step 6: 功能建模问题总结"""
+    logger.info("node_start", step="summary")
+    llm = get_llm()
+    tool = get_tool_for_step("summary")
+    messages = build_messages_for_step(state, "summary")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step6_summary" in tool_results:
+        step_result = tool_results["ariz_step6_summary"]
+        card_data = {"step": 6, "title": "问题总结", "status": "current", "saved": True, "data": step_result}
+
+    logger.info("node_end", step="summary", has_result=bool(step_result))
+    return {
+        "current_step": "causal",
+        "step_results": {**state["step_results"], "summary": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
+
+
+# ============ Step 7 Node ============
+
+async def step7_causal_node(state: ArizState) -> dict:
+    """Step 7: 因果链分析"""
+    logger.info("node_start", step="causal")
+    llm = get_llm()
+    tool = get_tool_for_step("causal")
+    messages = build_messages_for_step(state, "causal")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step7_causal" in tool_results:
+        step_result = tool_results["ariz_step7_causal"]
+        card_data = {"step": 7, "title": "因果链分析", "status": "current", "saved": True, "data": step_result}
+
+    logger.info("node_end", step="causal", has_result=bool(step_result))
+    return {
+        "current_step": "keypoint",
+        "step_results": {**state["step_results"], "causal": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
+
+
+# ============ Step 8 Node ============
+
+async def step8_keypoint_node(state: ArizState) -> dict:
+    """Step 8: 关键问题/切入点"""
+    logger.info("node_start", step="keypoint")
+    llm = get_llm()
+    tool = get_tool_for_step("keypoint")
+    messages = build_messages_for_step(state, "keypoint")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step8_keypoint" in tool_results:
+        step_result = tool_results["ariz_step8_keypoint"]
+        card_data = {"step": 8, "title": "关键问题", "status": "current", "saved": True, "data": step_result}
+
+    logger.info("node_end", step="keypoint", has_result=bool(step_result))
+    return {
+        "current_step": "solution",
+        "step_results": {**state["step_results"], "keypoint": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
+
+
+# ============ Step 9 Node ============
+
+async def step9_solution_node(state: ArizState) -> dict:
+    """Step 9: 生成创新方案"""
+    logger.info("node_start", step="solution")
+    llm = get_llm()
+    tool = get_tool_for_step("solution")
+    messages = build_messages_for_step(state, "solution")
+
+    response = await llm.ainvoke(messages, tools=[tool] if tool else None)
+    tool_results = parse_tool_calls(response)
+
+    step_result = {}
+    card_data = {}
+    if "ariz_step9_solution" in tool_results:
+        step_result = tool_results["ariz_step9_solution"]
+        card_data = {"step": 9, "title": "创新方案", "status": "current", "saved": True, "data": step_result}
+
+    logger.info("node_end", step="solution", has_result=bool(step_result))
+    return {
+        "current_step": "done",
+        "step_results": {**state["step_results"], "solution": step_result} if step_result else state["step_results"],
+        "card_data": card_data,
+        "messages": state["messages"] + [AIMessage(content=response.content)],
+    }
