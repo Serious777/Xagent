@@ -47,7 +47,9 @@ async def compress_messages(messages: list, current_step: str) -> list:
     rules = CONTEXT_RULES.get(current_step, {"max_messages": 30, "summarize_threshold": 25})
     max_msgs = rules["max_messages"]
 
-    if len(messages) <= max_msgs:
+    # 使用 summarize_threshold 作为触发点（低于 max_msgs），避免每次请求都压缩
+    summarize_at = rules.get("summarize_threshold", max_msgs - 5)
+    if len(messages) <= summarize_at:
         return messages
 
     # 分离 system prompt 和对话消息
@@ -59,11 +61,12 @@ async def compress_messages(messages: list, current_step: str) -> list:
         else:
             conversation_msgs.append(msg)
 
-    if len(conversation_msgs) <= max_msgs:
+    if len(conversation_msgs) <= summarize_at:
         return messages
 
-    # 需要压缩：保留最近的 max_msgs 条，压缩前面的
-    keep_recent = max_msgs - 2  # 留 2 个位置给摘要
+    # 需要压缩：保留最近的条目，压缩前面的
+    # 保留足够少的条目，使得下次添加 1 条消息后仍低于阈值
+    keep_recent = summarize_at - 2  # 留 2 个位置给摘要 + 缓冲
     old_messages = conversation_msgs[:-keep_recent]
     recent_messages = conversation_msgs[-keep_recent:]
 

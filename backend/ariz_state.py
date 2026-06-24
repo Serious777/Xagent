@@ -1,6 +1,9 @@
 """ARIZ 流程状态定义 — LangGraph StateGraph 专用"""
 from typing import TypedDict, Optional
-from langgraph.graph import END
+
+import structlog
+
+logger = structlog.get_logger()
 
 
 class ArizState(TypedDict):
@@ -8,7 +11,6 @@ class ArizState(TypedDict):
     current_step: str           # 当前步骤名（problem/components/...）
     step_results: dict          # 各步分析结果 {step_name: result_dict}
     messages: list              # 对话历史（LangChain message 格式）
-    database_context: dict      # 组件知识库查询结果
     card_data: dict             # 当前步骤的卡片数据（供前端渲染）
     error: Optional[str]        # 错误信息（如果有）
     thread_id: str              # 会话 ID
@@ -58,8 +60,23 @@ def create_initial_state() -> ArizState:
         "current_step": "problem",
         "step_results": {},
         "messages": [],
-        "database_context": {},
         "card_data": {},
         "error": None,
         "thread_id": "default",
     }
+
+
+def route_after_summary(state: ArizState) -> str:
+    """Step 6 后的条件路由：问题少 → 跳过因果链，直接到关键问题"""
+    problems = state["step_results"].get("summary", {}).get("problems", {})
+    total = 0
+    for v in problems.values():
+        if isinstance(v, list):
+            total += len(v)
+        elif isinstance(v, dict):
+            total += len(v)
+
+    logger.info("route_after_summary", problem_count=total)
+    if total <= 3:
+        return "keypoint"
+    return "causal"

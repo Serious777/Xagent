@@ -342,7 +342,324 @@ function Step4Detail({ data }: { data: any }) {
   );
 }
 
-// ========== 通用详情（Step 5-9） ==========
+// ========== Step 5: 系统结构分析（网络图） ==========
+
+/**
+ * 层次布局算法（Sugiyama 风格）
+ * 1. 分层：BFS 从入度为 0 的节点开始分配层级
+ * 2. 层内排序：减少交叉
+ * 3. 坐标计算：每层居中排列
+ */
+function hierarchicalLayout(
+  nodeNames: string[],
+  edges: Array<{ source: string; target: string }>,
+  nodeW: number, nodeH: number, padding: number,
+) {
+  const n = nodeNames.length;
+  if (n === 0) return { positions: {}, width: 0, height: 0 };
+
+  // 建邻接表
+  const outMap = new Map<string, Set<string>>();
+  const inMap = new Map<string, Set<string>>();
+  nodeNames.forEach(name => { outMap.set(name, new Set()); inMap.set(name, new Set()); });
+  edges.forEach(e => {
+    outMap.get(e.source)?.add(e.target);
+    inMap.get(e.target)?.add(e.source);
+  });
+
+  // 1. BFS 分层（从入度为 0 的节点开始）
+  const layer = new Map<string, number>();
+  const queue: string[] = [];
+  nodeNames.forEach(name => {
+    if (inMap.get(name)!.size === 0) {
+      layer.set(name, 0);
+      queue.push(name);
+    }
+  });
+  // 孤立节点（无入边无出边）放入第 0 层
+  nodeNames.forEach(name => {
+    if (inMap.get(name)!.size === 0 && outMap.get(name)!.size === 0 && !layer.has(name)) {
+      layer.set(name, 0);
+      queue.push(name);
+    }
+  });
+  // 如果所有节点都有入边（有环），从度最高的节点开始
+  if (queue.length === 0) {
+    const sorted = [...nodeNames].sort((a, b) =>
+      (outMap.get(b)!.size + inMap.get(b)!.size) - (outMap.get(a)!.size + inMap.get(a)!.size)
+    );
+    layer.set(sorted[0], 0);
+    queue.push(sorted[0]);
+  }
+
+  let head = 0;
+  while (head < queue.length) {
+    const cur = queue[head++];
+    const curLayer = layer.get(cur)!;
+    for (const next of outMap.get(cur)!) {
+      if (!layer.has(next)) {
+        layer.set(next, curLayer + 1);
+        queue.push(next);
+      }
+    }
+  }
+  // 未访问的节点
+  nodeNames.forEach(name => {
+    if (!layer.has(name)) layer.set(name, 0);
+  });
+
+  // 2. 按层分组
+  const maxLayer = Math.max(...layer.values());
+  const layers: string[][] = [];
+  for (let i = 0; i <= maxLayer; i++) layers.push([]);
+  nodeNames.forEach(name => layers[layer.get(name)!].push(name));
+
+  // 3. 层内排序：尽量让相连的节点靠近
+  for (let i = 1; i < layers.length; i++) {
+    layers[i].sort((a, b) => {
+      const aParents = Array.from(inMap.get(a)!);
+      const bParents = Array.from(inMap.get(b)!);
+      const aAvgParentPos = aParents.length > 0
+        ? aParents.reduce((s, p) => s + (layers[i - 1].indexOf(p) >= 0 ? layers[i - 1].indexOf(p) : 0), 0) / aParents.length
+        : 0;
+      const bAvgParentPos = bParents.length > 0
+        ? bParents.reduce((s, p) => s + (layers[i - 1].indexOf(p) >= 0 ? layers[i - 1].indexOf(p) : 0), 0) / bParents.length
+        : 0;
+      return aAvgParentPos - bAvgParentPos;
+    });
+  }
+
+  // 4. 计算坐标
+  const gapX = 120, gapY = 100;
+  const pos: Record<string, { x: number; y: number }> = {};
+
+  layers.forEach((layerNodes, layerIdx) => {
+    const count = layerNodes.length;
+    const totalWidth = count * nodeW + (count - 1) * gapX;
+    const startX = (padding * 2 + Math.max(...layers.map(l => l.length)) * (nodeW + gapX) - gapX - totalWidth) / 2;
+    layerNodes.forEach((name, colIdx) => {
+      pos[name] = {
+        x: Math.max(padding, startX + colIdx * (nodeW + gapX) + nodeW / 2),
+        y: padding + layerIdx * (nodeH + gapY) + nodeH / 2,
+      };
+    });
+  });
+
+  const rows = layers.length;
+  const maxColsInAnyLayer = Math.max(...layers.map(l => l.length));
+  const width = padding * 2 + maxColsInAnyLayer * nodeW + (maxColsInAnyLayer - 1) * gapX;
+  const height = padding * 2 + rows * nodeH + (rows - 1) * gapY;
+
+  return { positions: pos, width, height };
+}
+
+/** 截断标签 */
+function truncateLabel(text: string, maxLen: number = 5): string {
+  if (!text) return '';
+  const cleaned = text.replace(/[（(].*?[）)]/g, '').trim();
+  return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '…' : cleaned;
+}
+
+
+function Step5Detail({ data }: { data: any }) {
+  const functions: any[] = data.functions || [];
+  const keyProblems: any[] = data.key_problems || [];
+
+  const typeConfig: Record<string, { label: string; color: string }> = {
+    useful:       { label: '有益功能', color: 'bg-blue-50 text-blue-700 border-blue-200' },
+    insufficient: { label: '不足功能', color: 'bg-gray-100 text-gray-600 border-gray-200' },
+    excessive:    { label: '过度功能', color: 'bg-orange-50 text-orange-700 border-orange-200' },
+    harmful:      { label: '有害功能', color: 'bg-red-50 text-red-700 border-red-200' },
+  };
+
+  const severityConfig: Record<string, { label: string; color: string }> = {
+    high:   { label: '严重', color: 'bg-red-50 text-red-700 border-red-200' },
+    medium: { label: '中等', color: 'bg-orange-50 text-orange-700 border-orange-200' },
+    low:    { label: '轻微', color: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+  };
+
+  const keyProblemNodes = new Set(keyProblems.map((p: any) => p.node));
+
+  // 提取唯一节点
+  const nodeSet = new Set<string>();
+  functions.forEach(f => { nodeSet.add(f.source); nodeSet.add(f.target); });
+  const nodeNames = Array.from(nodeSet);
+
+  const nodeW = 130, nodeH = 38;
+
+  // 层次布局
+  const { positions: nodePositions, width: W, height: H } = React.useMemo(
+    () => hierarchicalLayout(nodeNames, functions, nodeW, nodeH, 60),
+    [nodeNames.join(','), functions.length],
+  );
+
+  // 边样式
+  const edgeStyle: Record<string, { stroke: string; strokeWidth: number; strokeDasharray?: string }> = {
+    useful:       { stroke: '#2563eb', strokeWidth: 2 },
+    harmful:      { stroke: '#ef4444', strokeWidth: 2.5, strokeDasharray: '8 4' },
+    insufficient: { stroke: '#6b7280', strokeWidth: 1.5, strokeDasharray: '6 4' },
+    excessive:    { stroke: '#ea580c', strokeWidth: 3 },
+  };
+
+  // Hover 状态
+  const [hoveredNode, setHoveredNode] = React.useState<string | null>(null);
+
+  // 计算 hover 相关节点和边
+  const connectedNodes = React.useMemo(() => {
+    if (!hoveredNode) return null;
+    const set = new Set<string>([hoveredNode]);
+    functions.forEach(f => {
+      if (f.source === hoveredNode) set.add(f.target);
+      if (f.target === hoveredNode) set.add(f.source);
+    });
+    return set;
+  }, [hoveredNode, functions]);
+
+  // 图例开关
+  const [visibleTypes, setVisibleTypes] = React.useState<Record<string, boolean>>({
+    useful: true, harmful: true, insufficient: true, excessive: true,
+  });
+  const toggleType = (t: string) => setVisibleTypes(prev => ({ ...prev, [t]: !prev[t] }));
+
+  // 缩放
+  const [zoom, setZoom] = React.useState(1);
+
+  // 过滤后的边
+  const visibleEdges = functions.filter((f: any) => visibleTypes[f.type] !== false);
+
+  // 节点和边的透明度
+  const nodeOpacity = (name: string) => {
+    if (!connectedNodes) return 1;
+    return connectedNodes.has(name) ? 1 : 0.15;
+  };
+  const edgeOpacity = (f: any) => {
+    if (!connectedNodes) return 1;
+    return connectedNodes.has(f.source) && connectedNodes.has(f.target) ? 1 : 0.08;
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* 网络图 */}
+      {nodeNames.length > 0 && (
+        <div>
+          <div className="flex items-center justify-between">
+            <Label text={`系统结构关系图（${nodeNames.length}个组件，${visibleEdges.length}条关系）`} />
+            <div className="flex items-center gap-1 text-xs">
+              <button onClick={() => setZoom(z => Math.max(0.3, z - 0.15))}
+                className="w-7 h-7 rounded border border-gray-300 hover:bg-gray-100 flex items-center justify-center text-gray-600">−</button>
+              <span className="w-12 text-center text-gray-500">{Math.round(zoom * 100)}%</span>
+              <button onClick={() => setZoom(z => Math.min(3, z + 0.15))}
+                className="w-7 h-7 rounded border border-gray-300 hover:bg-gray-100 flex items-center justify-center text-gray-600">+</button>
+              <button onClick={() => setZoom(1)}
+                className="ml-1 px-2 h-7 rounded border border-gray-300 hover:bg-gray-100 text-gray-600">1:1</button>
+            </div>
+          </div>
+          <div className="mt-2 border border-gray-200 rounded-lg overflow-auto bg-white" style={{ maxHeight: 600 }}>
+            <div style={{ transform: `scale(${zoom})`, transformOrigin: 'top left', width: W, height: H }}>
+              <svg viewBox={`0 0 ${W} ${H}`} width={W} height={H}>
+                <defs>
+                  <marker id="arrow" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                    <path d="M0,0 L10,3 L0,6 Z" fill="#94a3b8" />
+                  </marker>
+                  <marker id="arrow-red" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                    <path d="M0,0 L10,3 L0,6 Z" fill="#ef4444" />
+                  </marker>
+                  <marker id="arrow-blue" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                    <path d="M0,0 L10,3 L0,6 Z" fill="#2563eb" />
+                  </marker>
+                  <marker id="arrow-orange" viewBox="0 0 10 6" refX="10" refY="3" markerWidth="8" markerHeight="6" orient="auto">
+                    <path d="M0,0 L10,3 L0,6 Z" fill="#ea580c" />
+                  </marker>
+                </defs>
+
+                {/* 边：直线 + 白底标签 */}
+                {visibleEdges.map((f: any, i: number) => {
+                  const from = nodePositions[f.source];
+                  const to = nodePositions[f.target];
+                  if (!from || !to) return null;
+                  const style = edgeStyle[f.type] || edgeStyle.useful;
+                  const markerId = f.type === 'harmful' ? 'arrow-red' : f.type === 'excessive' ? 'arrow-orange' : f.type === 'useful' ? 'arrow-blue' : 'arrow';
+
+                  const dx = to.x - from.x, dy = to.y - from.y;
+                  const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                  const shrink = Math.min(70, dist * 0.25);
+                  const x1 = from.x + (dx / dist) * shrink;
+                  const y1 = from.y + (dy / dist) * shrink;
+                  const x2 = to.x - (dx / dist) * shrink;
+                  const y2 = to.y - (dy / dist) * shrink;
+
+                  const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+                  // 标签偏移到线条侧面
+                  const nx = -(dy / dist) * 16, ny = (dx / dist) * 16;
+                  const label = truncateLabel(f.function, 5);
+                  const op = edgeOpacity(f);
+
+                  return (
+                    <g key={`e${i}`} opacity={op} style={{ transition: 'opacity 0.2s' }}>
+                      <line x1={x1} y1={y1} x2={x2} y2={y2}
+                        stroke={style.stroke} strokeWidth={style.strokeWidth}
+                        strokeDasharray={style.strokeDasharray}
+                        markerEnd={`url(#${markerId})`} />
+                      {/* 白底标签 */}
+                      <rect x={mx + nx - 22} y={my + ny - 8} width={44} height={16}
+                        rx={3} fill="white" fillOpacity={0.85} />
+                      <text x={mx + nx} y={my + ny} textAnchor="middle" dominantBaseline="middle"
+                        className="fill-gray-600" style={{ fontSize: 9, fontWeight: 500 }}>{label}</text>
+                    </g>
+                  );
+                })}
+
+                {/* 节点 */}
+                {nodeNames.map((name) => {
+                  const pos = nodePositions[name];
+                  if (!pos) return null;
+                  const isKey = keyProblemNodes.has(name);
+                  const op = nodeOpacity(name);
+                  return (
+                    <g key={`n${name}`} opacity={op} style={{ transition: 'opacity 0.2s' }}
+                      onMouseEnter={() => setHoveredNode(name)}
+                      onMouseLeave={() => setHoveredNode(null)}
+                      className="cursor-pointer">
+                      <rect x={pos.x - nodeW / 2} y={pos.y - nodeH / 2} width={nodeW} height={nodeH}
+                        rx={8} ry={8}
+                        fill={isKey ? '#fef2f2' : '#f8fafc'}
+                        stroke={isKey ? '#ef4444' : hoveredNode === name ? '#3b82f6' : '#cbd5e1'}
+                        strokeWidth={isKey ? 2.5 : hoveredNode === name ? 2.5 : 1} />
+                      <text x={pos.x} y={pos.y + 1} textAnchor="middle" dominantBaseline="middle"
+                        className={`font-medium ${isKey ? 'fill-red-700' : 'fill-gray-800'}`}
+                        style={{ fontSize: 11 }}>
+                        {name}
+                      </text>
+                    </g>
+                  );
+                })}
+              </svg>
+            </div>
+          </div>
+          {/* 图例 */}
+          <div className="flex flex-wrap gap-3 mt-2">
+            {Object.entries(typeConfig).map(([k, v]) => {
+              const visible = visibleTypes[k] !== false;
+              return (
+                <button key={k} onClick={() => toggleType(k)}
+                  className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-opacity ${visible ? 'opacity-100' : 'opacity-40'}`}
+                  style={{ borderColor: k === 'useful' ? '#2563eb' : k === 'harmful' ? '#ef4444' : k === 'excessive' ? '#ea580c' : '#6b7280' }}>
+                  <span className="w-4 h-0.5 inline-block"
+                    style={{
+                      borderTop: k === 'harmful' || k === 'insufficient' ? `2px dashed ${k === 'harmful' ? '#ef4444' : '#6b7280'}` : k === 'excessive' ? '3px solid #ea580c' : '2px solid #2563eb',
+                    }} />
+                  <span className="text-gray-700">{v.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ========== 通用详情（Step 6-9） ==========
 function GenericDetail({ data }: { data: any }) {
   return (
     <pre className="text-sm text-gray-700 bg-gray-50 rounded-lg p-4 overflow-auto max-h-[500px]">
@@ -374,6 +691,7 @@ export default function ArizDetailPanel({ stepData, onClose, expanded, onToggleE
       case 2: return <Step2Detail data={stepData.data} />;
       case 3: return <Step3Detail data={stepData.data} />;
       case 4: return <Step4Detail data={stepData.data} />;
+      case 5: return <Step5Detail data={stepData.data} />;
       default: return <GenericDetail data={stepData.data} />;
     }
   };

@@ -2,7 +2,7 @@
 import structlog
 from langgraph.graph import StateGraph, END
 
-from ariz_state import ArizState
+from ariz_state import ArizState, route_after_summary
 from ariz_nodes import (
     step1_problem_node,
     step2_components_node,
@@ -16,22 +16,6 @@ from ariz_nodes import (
 )
 
 logger = structlog.get_logger()
-
-
-def route_after_summary(state: ArizState) -> str:
-    """Step 6 后的条件路由：问题少 → 跳过因果链，直接到关键问题"""
-    problems = state["step_results"].get("summary", {}).get("problems", {})
-    total = 0
-    for v in problems.values():
-        if isinstance(v, list):
-            total += len(v)
-        elif isinstance(v, dict):
-            total += len(v)
-
-    logger.info("route_after_summary", problem_count=total)
-    if total <= 3:
-        return "keypoint"
-    return "causal"
 
 
 def build_ariz_graph(checkpointer=None):

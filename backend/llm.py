@@ -16,8 +16,9 @@ def get_llm() -> ChatOpenAI:
     )
 
 
+@lru_cache(maxsize=1)
 def get_llm_no_stream() -> ChatOpenAI:
-    """获取非流式 LLM 客户端（用于摘要等场景）"""
+    """获取非流式 LLM 客户端（用于摘要等场景，单例）"""
     return ChatOpenAI(
         model=os.getenv("XIAOMI_MODEL", "mimo-v2.5"),
         base_url=os.getenv("XIAOMI_BASE_URL"),

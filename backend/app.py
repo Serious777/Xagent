@@ -4,6 +4,7 @@ import os
 import sqlite3
 import uuid
 import asyncio
+import time
 from contextlib import contextmanager
 from datetime import datetime
 import structlog
@@ -252,6 +253,9 @@ def chat():
             finally:
                 loop.close()
 
+            # 构建完整回复（含卡片数据），用于保存和发送
+            full_response = ""
+
             # 输出卡片数据（匹配前端 parseArizSteps 正则格式）
             card_data = result.get("card_data", {})
             if card_data and card_data.get("step"):
@@ -269,15 +273,21 @@ def chat():
                     "status": "saved",
                 }
                 tool_text = f"\n\n**调用工具: ariz_step{step_num}_{step_name}**\n```json\n{json.dumps(tool_result, ensure_ascii=False, indent=2)}\n```\n"
+                full_response += tool_text
                 yield f'0:{json.dumps(tool_text)}\n'
 
-            # 输出回复
+            # 输出回复（分块发送，模拟流式输出）
             response = result.get("response", "")
             if response:
-                yield f'0:{json.dumps(response)}\n'
+                full_response += response
+                chunk_size = 10
+                for i in range(0, len(response), chunk_size):
+                    chunk = response[i:i + chunk_size]
+                    yield f'0:{json.dumps(chunk)}\n'
+                    time.sleep(0.02)  # 20ms 延迟，给前端渲染时间
 
-            # 保存消息
-            _save_assistant_message(conv_id, response)
+            # 保存完整回复（含卡片数据），确保历史记录可解析
+            _save_assistant_message(conv_id, full_response)
 
         except Exception as e:
             logger.error("agent_error", error=str(e))
@@ -307,11 +317,17 @@ def ariz_status(conv_id):
 @app.route("/api/ariz/reset/<conv_id>", methods=["POST"])
 def ariz_reset(conv_id):
     """重置 ARIZ 流程"""
-    with get_db() as conn:
-        try:
+    try:
+        with get_db() as conn:
             conn.execute("DELETE FROM agent_states WHERE thread_id = ?", (conv_id,))
-        except Exception:
-            pass  # 表可能不存在
+    except Exception as e:
+        # 表不存在时静默成功（首次运行或测试环境），其他错误记录日志
+        if "no such table" in str(e).lower():
+            logger.info("ariz_reset_no_table", conv_id=conv_id)
+        else:
+            logger.error("ariz_reset_failed", conv_id=conv_id, error=str(e))
+            return jsonify({"ok": False, "error": f"重置失败: {str(e)}"}), 500
+    logger.info("ariz_reset_success", conv_id=conv_id)
     return jsonify({"ok": True, "message": "流程已重置"})
 
 

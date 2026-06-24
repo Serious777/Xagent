@@ -2,16 +2,24 @@
 
 
 def make_step_tool(step_num: int, name: str, label: str, fields: list) -> dict:
-    """生成 ARIZ 步骤工具定义（OpenAI function calling 格式）"""
+    """生成 ARIZ 步骤工具定义（OpenAI function calling 格式）
+
+    fields 格式: [{"name": "x", "type": "array", "desc": "...", "required": True, "items": {...}}]
+    """
     props = {}
     required = []
     for f in fields:
-        props[f["name"]] = {
+        prop = {
             "type": f.get("type", "string"),
             "description": f.get("desc", ""),
         }
+        if "items" in f:
+            prop["items"] = f["items"]
+        if "properties" in f:
+            prop["properties"] = f["properties"]
         if f.get("required"):
             required.append(f["name"])
+        props[f["name"]] = prop
     return {
         "type": "function",
         "function": {
@@ -93,16 +101,104 @@ STEP2_TOOL = {
     },
 }
 
-# Step 3-9: 使用 make_step_tool 生成
-STEP3_TOOL = make_step_tool(3, "contacts", "接触关系分析", [
-    {"name": "contacts", "type": "array", "desc": "组件间接触关系列表", "required": True},
-])
-STEP4_TOOL = make_step_tool(4, "function", "功能建模", [
-    {"name": "functions", "type": "array", "desc": "功能模型列表", "required": True},
-])
-STEP5_TOOL = make_step_tool(5, "structure", "系统结构分析", [
-    {"name": "structure_info", "type": "object", "desc": "结构参数", "required": True},
-])
+# Step 3: 接触关系分析（手动定义 items schema）
+STEP3_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "ariz_step3_contacts",
+        "description": "ARIZ第3步：用户确认后调用此工具保存接触关系分析结果",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "contacts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "component_a": {"type": "string", "description": "组件A名称"},
+                            "component_b": {"type": "string", "description": "组件B名称"},
+                            "contact_type": {"type": "string", "description": "接触类型：热传导/对流换热/机械固定/电气连接/待分析"},
+                            "interface": {"type": "string", "description": "接触界面描述"},
+                        },
+                        "required": ["component_a", "component_b", "contact_type"],
+                    },
+                    "description": "组件间接触关系列表",
+                },
+            },
+            "required": ["contacts"],
+        },
+    },
+}
+
+# Step 4: 功能建模（手动定义 items schema）
+STEP4_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "ariz_step4_function",
+        "description": "ARIZ第4步：用户确认后调用此工具保存功能建模结果",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "functions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string", "description": "功能作用者（组件名称）"},
+                            "target": {"type": "string", "description": "功能作用对象（组件名称）"},
+                            "function": {"type": "string", "description": "功能描述"},
+                            "type": {"type": "string", "description": "功能类型：useful/insufficient/excessive/harmful"},
+                        },
+                        "required": ["source", "target", "function", "type"],
+                    },
+                    "description": "功能模型列表",
+                },
+            },
+            "required": ["functions"],
+        },
+    },
+}
+# Step 5: 系统结构分析（基于 Step 4 功能模型，识别关键问题节点）
+STEP5_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "ariz_step5_structure",
+        "description": "ARIZ第5步：基于功能模型分析系统结构，识别关键问题节点",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "functions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "source": {"type": "string", "description": "功能作用者（组件名称）"},
+                            "target": {"type": "string", "description": "功能作用对象（组件名称）"},
+                            "function": {"type": "string", "description": "功能描述"},
+                            "type": {"type": "string", "description": "功能类型：useful/insufficient/excessive/harmful"},
+                        },
+                        "required": ["source", "target", "function", "type"],
+                    },
+                    "description": "系统功能模型列表（复用 Step 4 数据）",
+                },
+                "key_problems": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "node": {"type": "string", "description": "问题组件名称"},
+                            "problem": {"type": "string", "description": "问题描述"},
+                            "severity": {"type": "string", "description": "严重程度：high/medium/low"},
+                        },
+                        "required": ["node", "problem", "severity"],
+                    },
+                    "description": "关键问题节点列表",
+                },
+            },
+            "required": ["functions", "key_problems"],
+        },
+    },
+}
 STEP6_TOOL = make_step_tool(6, "summary", "问题总结", [
     {"name": "problems", "type": "object", "desc": "分类问题清单", "required": True},
 ])

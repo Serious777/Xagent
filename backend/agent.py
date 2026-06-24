@@ -3,12 +3,13 @@ import json
 import os
 import sqlite3
 import structlog
+from contextlib import contextmanager
 from datetime import datetime
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from llm import get_llm
 from prompts import load_prompt
-from ariz_state import ArizState, create_initial_state, get_step_label, ARIZ_STEP_NAMES
+from ariz_state import ArizState, create_initial_state, get_step_label, ARIZ_STEP_NAMES, get_next_step
 from context_manager import compress_messages
 from observability import TraceContext
 from ariz_nodes import (
@@ -36,53 +37,65 @@ STEP_NODES = {
 DB_PATH = os.path.join(os.path.dirname(__file__), "xagent.db")
 
 
+# ============ 数据库连接管理 ============
+
+@contextmanager
+def _get_db():
+    """数据库连接上下文管理器，自动提交/关闭/回滚"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _init_agent_table():
     """初始化 Agent 状态表"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS agent_states (
-            thread_id TEXT PRIMARY KEY,
-            current_step TEXT NOT NULL DEFAULT 'problem',
-            step_results TEXT NOT NULL DEFAULT '{}',
-            messages_json TEXT NOT NULL DEFAULT '[]',
-            card_data TEXT NOT NULL DEFAULT '{}',
-            updated_at TEXT NOT NULL
-        );
-    """)
-    conn.commit()
-    conn.close()
+    with _get_db() as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS agent_states (
+                thread_id TEXT PRIMARY KEY,
+                current_step TEXT NOT NULL DEFAULT 'problem',
+                step_results TEXT NOT NULL DEFAULT '{}',
+                messages_json TEXT NOT NULL DEFAULT '[]',
+                card_data TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            );
+        """)
 
 
 _init_agent_table()
 
 
+# ============ 消息序列化 ============
+
 def _serialize_messages(messages: list) -> list:
     """将 LangChain messages 序列化为 JSON 可存储格式"""
-    result = []
-    for msg in messages:
-        if isinstance(msg, SystemMessage):
-            result.append({"role": "system", "content": msg.content})
-        elif isinstance(msg, HumanMessage):
-            result.append({"role": "user", "content": msg.content})
-        elif isinstance(msg, AIMessage):
-            result.append({"role": "assistant", "content": msg.content})
-    return result
+    return [
+        {"role": "system", "content": msg.content} if isinstance(msg, SystemMessage)
+        else {"role": "user", "content": msg.content} if isinstance(msg, HumanMessage)
+        else {"role": "assistant", "content": msg.content}
+        for msg in messages
+        if isinstance(msg, (SystemMessage, HumanMessage, AIMessage))
+    ]
 
 
 def _deserialize_messages(messages_json: list) -> list:
     """将 JSON 格式反序列化为 LangChain messages"""
-    result = []
-    for msg in messages_json:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        if role == "system":
-            result.append(SystemMessage(content=content))
-        elif role == "user":
-            result.append(HumanMessage(content=content))
-        elif role == "assistant":
-            result.append(AIMessage(content=content))
-    return result
+    role_map = {"system": SystemMessage, "user": HumanMessage, "assistant": AIMessage}
+    return [
+        role_map[msg["role"]](content=msg["content"])
+        for msg in messages_json
+        if msg.get("role") in role_map
+    ]
 
+
+# ============ Agent ============
 
 class XagentAgent:
     """Xagent 核心 Agent — 单步执行模式 + SQLite 持久化"""
@@ -98,10 +111,13 @@ class XagentAgent:
         if state is None:
             state = self._load_state(thread_id)
 
-        # 添加用户消息
+        # 创建新 state，避免修改调用方的原始 dict（不可变模式）
         user_msg = HumanMessage(content=user_message)
-        state["messages"] = state.get("messages", []) + [user_msg]
-        state["thread_id"] = thread_id
+        state = {
+            **state,
+            "messages": state.get("messages", []) + [user_msg],
+            "thread_id": thread_id,
+        }
 
         # 上下文压缩
         state["messages"] = await compress_messages(
@@ -145,8 +161,12 @@ class XagentAgent:
 
         except Exception as e:
             trace_ctx.record_error(str(e))
-            trace_ctx.finish()
             logger.error("agent_run_failed", error=str(e), thread_id=thread_id)
+            # 异常时也保存状态，避免用户消息丢失
+            try:
+                self._save_state(thread_id, state)
+            except Exception as save_err:
+                logger.error("state_save_on_error_failed", error=str(save_err))
             return {
                 "response": f"⚠️ AI 服务暂时不可用：{str(e)}",
                 "card_data": {},
@@ -155,7 +175,7 @@ class XagentAgent:
             }
 
     def confirm_step(self, thread_id: str) -> dict:
-        """用户确认当前步骤，推进到下一步"""
+        """用户确认当前步骤（步骤已由节点函数推进，此方法仅返回当前状态）"""
         state = self._load_state(thread_id)
         current_step = state["current_step"]
 
@@ -167,7 +187,7 @@ class XagentAgent:
             }
 
         current_label = get_step_label(current_step)
-        logger.info("step_confirmed", thread_id=thread_id, to_step=current_step)
+        logger.info("step_confirmed", thread_id=thread_id, step=current_step)
 
         return {
             "ok": True,
@@ -180,45 +200,43 @@ class XagentAgent:
         return self._load_state(thread_id)
 
     def _load_state(self, thread_id: str) -> ArizState:
-        """从 SQLite 加载状态"""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT current_step, step_results, messages_json, card_data FROM agent_states WHERE thread_id = ?",
-            (thread_id,),
-        ).fetchone()
-        conn.close()
+        """从 SQLite 加载状态（返回新 dict，不修改外部状态）"""
+        with _get_db() as conn:
+            row = conn.execute(
+                "SELECT current_step, step_results, messages_json, card_data "
+                "FROM agent_states WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
 
         if row:
-            state = create_initial_state()
-            state["current_step"] = row["current_step"]
-            state["step_results"] = json.loads(row["step_results"])
-            state["messages"] = _deserialize_messages(json.loads(row["messages_json"]))
-            state["card_data"] = json.loads(row["card_data"])
-            state["thread_id"] = thread_id
-            return state
-        else:
-            state = create_initial_state()
-            state["thread_id"] = thread_id
-            return state
+            return {
+                "current_step": row["current_step"],
+                "step_results": json.loads(row["step_results"]),
+                "messages": _deserialize_messages(json.loads(row["messages_json"])),
+                "card_data": json.loads(row["card_data"]),
+                "error": None,
+                "thread_id": thread_id,
+            }
+
+        return create_initial_state() | {"thread_id": thread_id}
 
     def _save_state(self, thread_id: str, state: ArizState):
         """保存状态到 SQLite"""
-        messages_json = json.dumps(_serialize_messages(state.get("messages", [])), ensure_ascii=False)
+        messages_json = json.dumps(
+            _serialize_messages(state.get("messages", [])), ensure_ascii=False
+        )
         step_results = json.dumps(state.get("step_results", {}), ensure_ascii=False)
         card_data = json.dumps(state.get("card_data", {}), ensure_ascii=False)
         now = datetime.now().isoformat()
 
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute(
-            """INSERT OR REPLACE INTO agent_states
-               (thread_id, current_step, step_results, messages_json, card_data, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (thread_id, state.get("current_step", "problem"), step_results,
-             messages_json, card_data, now),
-        )
-        conn.commit()
-        conn.close()
+        with _get_db() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO agent_states
+                   (thread_id, current_step, step_results, messages_json, card_data, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (thread_id, state.get("current_step", "problem"), step_results,
+                 messages_json, card_data, now),
+            )
         logger.info("state_saved", thread_id=thread_id, step=state.get("current_step"))
 
 

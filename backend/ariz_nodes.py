@@ -3,13 +3,58 @@ import json
 import structlog
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
-from ariz_state import ArizState, get_step_label, get_step_index
+from ariz_state import ArizState, get_step_label, get_step_index, route_after_summary
 from ariz_tools import get_tool_for_step, parse_tool_calls
 from prompts import load_prompt
 from llm import get_llm
 from component_db import search_system, get_system_components
 
 logger = structlog.get_logger()
+
+
+# ============ 数据验证 ============
+
+def _validate_contacts(raw: list) -> list:
+    """验证并清洗 contacts 列表，过滤不符合格式的条目"""
+    valid = []
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        a = c.get("component_a", "")
+        b = c.get("component_b", "")
+        if not a or not b:
+            continue
+        valid.append({
+            "component_a": str(a),
+            "component_b": str(b),
+            "contact_type": str(c.get("contact_type", "待分析")),
+            "interface": str(c.get("interface", "")),
+        })
+    return valid
+
+
+def _validate_functions(raw: list) -> list:
+    """验证并清洗 functions 列表，过滤不符合格式的条目"""
+    valid_types = {"useful", "insufficient", "excessive", "harmful"}
+    valid = []
+    for f in raw:
+        if not isinstance(f, dict):
+            continue
+        src = f.get("source", "")
+        tgt = f.get("target", "")
+        func = f.get("function", "")
+        ftype = f.get("type", "useful")
+        if not src or not tgt or not func:
+            continue
+        if ftype not in valid_types:
+            ftype = "useful"
+        valid.append({
+            "source": str(src),
+            "target": str(tgt),
+            "function": str(func),
+            "type": ftype,
+        })
+    return valid
 
 
 def build_messages_for_step(state: ArizState, step_name: str) -> list:
@@ -66,6 +111,13 @@ def summarize_step_result(step_name: str, result: dict) -> str:
             lines.append(f"- 约束：{'、'.join(result['constraints'])}")
         if result.get("contradiction_hint"):
             lines.append(f"- 矛盾方向：{result['contradiction_hint']}")
+        # 注入数据库组件关系（供 Step 3 使用）
+        db_query = result.get("database_query", {})
+        relations = db_query.get("primary_system", {}).get("relations", [])
+        if relations:
+            lines.append("- 数据库已知组件关系：")
+            for r in relations[:10]:
+                lines.append(f"  {r.get('component_a', '')} ↔ {r.get('component_b', '')}：{r.get('relation_type', '')}（{r.get('interface_desc', '')}）")
         return "\n".join(lines) if lines else json.dumps(result, ensure_ascii=False)[:200]
 
     elif step_name == "components":
@@ -78,6 +130,17 @@ def summarize_step_result(step_name: str, result: dict) -> str:
         if comps:
             names = [c if isinstance(c, str) else c.get("name", str(c)) for c in comps]
             lines.append(f"- 组件：{'、'.join(names)}")
+        # 注入数据库组件功能信息（供 Step 4 使用）
+        db_query = result.get("database_query", {})
+        db_comps = db_query.get("primary_system", {}).get("components", [])
+        if db_comps:
+            lines.append("- 数据库已知组件功能：")
+            for comp in db_comps[:8]:
+                comp_name = comp.get("name", "")
+                funcs = comp.get("functions", [])
+                if funcs:
+                    func_strs = [f"{f.get('function_name', '')}({f.get('function_type', '')})" for f in funcs[:3]]
+                    lines.append(f"  {comp_name}：{'、'.join(func_strs)}")
         return "\n".join(lines) if lines else json.dumps(result, ensure_ascii=False)[:200]
 
     elif step_name == "contacts":
@@ -235,13 +298,33 @@ async def step2_components_node(state: ArizState) -> dict:
             "system_name": args.get("system_name", primary_system.get("system", {}).get("name", "")),
             "all_components": all_components,
             "user_added": user_added_normalized,
+            "database_query": db_result,  # 保留给下游步骤使用
         }
+        # 前端需要 database_query 来展示数据库组件的函数和描述
+        # 只传递前端需要的字段，过滤掉内部数据库 ID 等
+        db_system = primary_system.get("system", {})
+        db_comps_for_card = [
+            {"name": c.get("name", ""), "functions": c.get("functions", []), "description": c.get("description", "")}
+            for c in primary_system.get("components", [])
+        ]
         card_data = {
             "step": 2,
             "title": "系统组件分析",
             "status": "current",
             "saved": True,
-            "data": {**step_result, "database_query": db_result},
+            "data": {
+                "supersystem": args.get("supersystem", ""),
+                "supersystem_components": supersystem_components,
+                "system_name": args.get("system_name", db_system.get("name", "")),
+                "all_components": all_components,
+                "user_added": user_added_normalized,
+                "database_query": {
+                    "primary_system": {
+                        "system": {"name": db_system.get("name", ""), "description": db_system.get("description", "")},
+                        "components": db_comps_for_card,
+                    }
+                },
+            },
         }
 
     logger.info("node_end", step="components", has_result=bool(step_result))
@@ -269,7 +352,8 @@ async def step3_contacts_node(state: ArizState) -> dict:
     step_result = {}
     card_data = {}
     if "ariz_step3_contacts" in tool_results:
-        contacts = tool_results["ariz_step3_contacts"].get("contacts", [])
+        raw_contacts = tool_results["ariz_step3_contacts"].get("contacts", [])
+        contacts = _validate_contacts(raw_contacts)
         step_result = {"contacts": contacts}
 
         step2_data = state["step_results"].get("components", {})
@@ -281,29 +365,53 @@ async def step3_contacts_node(state: ArizState) -> dict:
             "data": {**step_result, "all_components": step2_data.get("all_components", [])},
         }
 
-    # 兜底：LLM 没调工具时，从 Step 2 组件自动生成接触关系
+    # 兜底：优先使用数据库已知关系，不足时补充组件对
     if not step_result:
-        step2_data = state["step_results"].get("components", {})
-        all_comp = step2_data.get("all_components", [])
-        if len(all_comp) >= 2:
+        # 从数据库获取已知关系
+        step1_data = state["step_results"].get("problem", {})
+        db_relations = step1_data.get("database_query", {}).get("primary_system", {}).get("relations", [])
+
+        if db_relations:
+            auto_contacts = [
+                {
+                    "component_a": r.get("component_a", ""),
+                    "component_b": r.get("component_b", ""),
+                    "contact_type": r.get("relation_type", "待分析"),
+                    "interface": r.get("interface_desc", ""),
+                }
+                for r in db_relations
+                if r.get("component_a") and r.get("component_b")
+            ]
+        else:
+            # 数据库无关系时，从组件列表生成（限制数量避免爆炸）
+            step2_data = state["step_results"].get("components", {})
+            all_comp = step2_data.get("all_components", [])
+            max_pairs = min(len(all_comp) * (len(all_comp) - 1) // 2, 30)
             auto_contacts = []
             for i in range(len(all_comp)):
                 for j in range(i + 1, len(all_comp)):
+                    if len(auto_contacts) >= max_pairs:
+                        break
                     auto_contacts.append({
                         "component_a": all_comp[i],
                         "component_b": all_comp[j],
                         "contact_type": "待分析",
                         "interface": "",
                     })
+                if len(auto_contacts) >= max_pairs:
+                    break
+
+        if auto_contacts:
             step_result = {"contacts": auto_contacts}
+            step2_data = state["step_results"].get("components", {})
             card_data = {
                 "step": 3,
                 "title": "接触关系分析",
                 "status": "current",
                 "saved": True,
-                "data": {**step_result, "all_components": all_comp},
+                "data": {**step_result, "all_components": step2_data.get("all_components", [])},
             }
-            logger.info("step3_fallback", contact_count=len(auto_contacts))
+            logger.info("step3_fallback", contact_count=len(auto_contacts), source="db" if db_relations else "generated")
 
     logger.info("node_end", step="contacts", has_result=bool(step_result))
     new_step = "function" if step_result else "contacts"
@@ -330,7 +438,8 @@ async def step4_function_node(state: ArizState) -> dict:
     step_result = {}
     card_data = {}
     if "ariz_step4_function" in tool_results:
-        functions = tool_results["ariz_step4_function"].get("functions", [])
+        raw_functions = tool_results["ariz_step4_function"].get("functions", [])
+        functions = _validate_functions(raw_functions)
         step_result = {"functions": functions}
         card_data = {
             "step": 4, "title": "功能建模", "status": "current", "saved": True,
@@ -377,8 +486,45 @@ async def step4_function_node(state: ArizState) -> dict:
 
 # ============ Step 5 Node ============
 
+def _validate_structure(raw: dict) -> dict:
+    """验证并清洗 Step 5 结构分析结果"""
+    valid_types = {"useful", "insufficient", "excessive", "harmful"}
+    valid_severities = {"high", "medium", "low"}
+
+    # 验证 functions（复用 Step 4 格式）
+    functions = []
+    for f in raw.get("functions", []):
+        if not isinstance(f, dict):
+            continue
+        src = str(f.get("source", ""))
+        tgt = str(f.get("target", ""))
+        func = str(f.get("function", ""))
+        ftype = str(f.get("type", "useful"))
+        if not src or not tgt or not func:
+            continue
+        if ftype not in valid_types:
+            ftype = "useful"
+        functions.append({"source": src, "target": tgt, "function": func, "type": ftype})
+
+    # 验证 key_problems
+    key_problems = []
+    for p in raw.get("key_problems", []):
+        if not isinstance(p, dict):
+            continue
+        node = str(p.get("node", ""))
+        problem = str(p.get("problem", ""))
+        severity = str(p.get("severity", "medium"))
+        if not node or not problem:
+            continue
+        if severity not in valid_severities:
+            severity = "medium"
+        key_problems.append({"node": node, "problem": problem, "severity": severity})
+
+    return {"functions": functions, "key_problems": key_problems}
+
+
 async def step5_structure_node(state: ArizState) -> dict:
-    """Step 5: 系统结构分析"""
+    """Step 5: 系统结构分析（基于 Step 4 功能模型，识别关键问题节点）"""
     logger.info("node_start", step="structure")
     llm = get_llm()
     tool = get_tool_for_step("structure")
@@ -390,7 +536,8 @@ async def step5_structure_node(state: ArizState) -> dict:
     step_result = {}
     card_data = {}
     if "ariz_step5_structure" in tool_results:
-        step_result = tool_results["ariz_step5_structure"]
+        raw_structure = tool_results["ariz_step5_structure"]
+        step_result = _validate_structure(raw_structure)
         card_data = {"step": 5, "title": "系统结构分析", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="structure", has_result=bool(step_result))
@@ -422,7 +569,13 @@ async def step6_summary_node(state: ArizState) -> dict:
         card_data = {"step": 6, "title": "问题总结", "status": "current", "saved": True, "data": step_result}
 
     logger.info("node_end", step="summary", has_result=bool(step_result))
-    new_step = "causal" if step_result else "summary"
+    # 使用 LangGraph 条件路由：问题少则跳过因果链分析
+    if step_result:
+        new_step = route_after_summary(
+            {**state, "step_results": {**state["step_results"], "summary": step_result}}
+        )
+    else:
+        new_step = "summary"
     return {
         "current_step": new_step,
         "step_results": {**state["step_results"], "summary": step_result} if step_result else state["step_results"],
